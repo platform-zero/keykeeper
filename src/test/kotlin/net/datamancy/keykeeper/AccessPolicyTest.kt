@@ -22,6 +22,9 @@ class AccessPolicyTest {
         }
         assertFalse(AccessPolicy.may(person, shared, Right.READ))
         assertFalse(AccessPolicy.may(agent, humanShared, Right.READ))
+        assertFailsWith<IllegalArgumentException> {
+            AccessPolicy.share(agent, shared, Grant(person, setOf(Right.EDIT)))
+        }
     }
 
     @Test fun `revocation removes agent access immediately from the policy`() {

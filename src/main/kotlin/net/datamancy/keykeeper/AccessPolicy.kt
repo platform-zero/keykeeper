@@ -31,6 +31,7 @@ object AccessPolicy {
 
     fun share(actor: Principal, item: CredentialMetadata, grant: Grant): CredentialMetadata {
         require(may(actor, item, Right.SHARE)) { "Sharing requires SHARE permission" }
+        require(grant.rights.all { may(actor, item, it) }) { "Cannot grant rights you do not hold" }
         require(grant.recipient.issuer == item.owner.issuer) { "Cross-issuer grants are not supported" }
         return item.copy(grants = item.grants.filterNot {
             it.recipient.issuer == grant.recipient.issuer && it.recipient.subject == grant.recipient.subject
