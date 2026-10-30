@@ -21,10 +21,13 @@ fun main(args: Array<String>) {
                 println("Keykeeper ${args[1]} loopback at http://127.0.0.1:${web.port}/")
             }
             "cli" -> {
-                require(args.size > 1 && args[1] in setOf("--oidc", "--local-test"))
-                cli(args.drop(2), tokenVariable = if (args[1] == "--oidc") "KEYKEEPER_ACCESS_TOKEN" else "KEYKEEPER_TEST_TOKEN")
+                require(args.size > 1 && args[1] in setOf("--device", "--oidc", "--local-test"))
+                cli(args.drop(2), tokenVariable = if (args[1] == "--local-test") "KEYKEEPER_TEST_TOKEN" else "KEYKEEPER_ACCESS_TOKEN",
+                    tokenProvider = if (args[1] == "--device") {
+                        { DeviceOidc(URI(env("KEYKEEPER_OIDC_ISSUER")), env("KEYKEEPER_OIDC_AGENT_CLIENT")).login() }
+                    } else null)
             }
-            else -> error("Usage: serve --oidc|--local-test | cli --oidc|--local-test list|read ID|create|edit ID|share ID ISSUER SUBJECT HUMAN|AGENT RIGHTS|revoke ID ISSUER SUBJECT HUMAN|AGENT")
+            else -> error("Usage: serve --oidc|--local-test | cli --device|--oidc|--local-test list|read ID|create|edit ID|share ID ISSUER SUBJECT HUMAN|AGENT RIGHTS|revoke ID ISSUER SUBJECT HUMAN|AGENT")
         }
     } catch (_: Exception) {
         System.err.println("Keykeeper request/configuration failed (no secret details printed)")
@@ -69,17 +72,19 @@ internal fun serveOidc(environment: (String) -> String? = System::getenv, audit:
         env("KEYKEEPER_BAO_TOKEN", environment))
     val port = environment("KEYKEEPER_PORT")?.toInt() ?: 8765
     require(port in 1..65535)
-    return VaultWeb(Vault(store, verifier, audit), port).also { it.start() }
+    val vault = Vault(store, verifier, audit)
+    val browser = BrowserOidc(PinnedKeycloakCodeClient(realm, humanClient), vault)
+    return VaultWeb(vault, port, browser).also { it.start() }
 }
 
 internal fun cli(args: List<String>, environment: (String) -> String? = System::getenv,
                  input: Reader = System.`in`.reader(), output: (String) -> Unit = ::println,
-                 tokenVariable: String = "KEYKEEPER_TEST_TOKEN") {
+                 tokenVariable: String = "KEYKEEPER_TEST_TOKEN", tokenProvider: (() -> String)? = null) {
     require(tokenVariable in setOf("KEYKEEPER_TEST_TOKEN", "KEYKEEPER_ACCESS_TOKEN"))
     val base = URI(environment("KEYKEEPER_URL") ?: "http://127.0.0.1:8765")
     require(base.scheme == "http" && base.host in setOf("127.0.0.1", "localhost", "::1") && base.rawUserInfo == null &&
         base.rawQuery == null && base.rawFragment == null && (base.path == "" || base.path == "/"))
-    val token = env(tokenVariable, environment)
+    val token = tokenProvider?.invoke() ?: env(tokenVariable, environment)
     val path: String
     val method: String
     val payload: JsonElement?

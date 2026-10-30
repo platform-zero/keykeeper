@@ -2,6 +2,14 @@ package net.datamancy.keykeeper
 
 import kotlinx.serialization.json.*
 import java.net.ServerSocket
+import java.net.InetSocketAddress
+import java.net.URLDecoder
+import com.sun.net.httpserver.HttpServer
+import java.security.KeyPairGenerator
+import java.security.Signature
+import java.security.interfaces.RSAPublicKey
+import java.security.MessageDigest
+import java.util.Base64
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -166,6 +174,133 @@ class DisposableRaftRestoreTest {
         } finally {
             target?.close()
             source?.close()
+            Files.walk(scratch).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+        }
+    }
+
+    @Test fun `fake OIDC browser PKCE session and agent JWT use real disposable KV v2`() {
+        require(System.getenv("KEYKEEPER_DISPOSABLE_RAFT_CONFIRM") == "YES-NEW-INSTANCE-ONLY")
+        val binary = Path.of(System.getenv("KEYKEEPER_TEST_BAO_BINARY") ?: error("Missing local OpenBao binary"))
+        require(Files.isRegularFile(binary) && Files.isExecutable(binary))
+        val parent = Path.of("build", "raft-scratch").toAbsolutePath()
+        Files.createDirectories(parent)
+        val scratch = Files.createTempDirectory(parent, "keykeeper-oidc-")
+        val idp = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        var bao: Node? = null
+        try {
+            bao = Node(binary, scratch.resolve("bao"), "oidc-${UUID.randomUUID()}")
+            val keys = bao.initialize()
+            val mount = "keykeeper-test-${UUID.randomUUID().toString().take(8)}"
+            assertEquals(204, bao.call("POST", "/v1/sys/mounts/$mount", keys.token,
+                "{\"type\":\"kv\",\"options\":{\"version\":\"2\"}}".toByteArray()).statusCode())
+            val pair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+            fun b64(bytes: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+            fun unsigned(n: java.math.BigInteger) = n.toByteArray().let { if (it[0] == 0.toByte()) it.drop(1).toByteArray() else it }
+            val public = pair.public as RSAPublicKey
+            val jwks = buildJsonObject { put("keys", JsonArray(listOf(buildJsonObject {
+                put("kid", "disposable"); put("kty", "RSA"); put("alg", "RS256"); put("use", "sig")
+                put("n", b64(unsigned(public.modulus))); put("e", b64(unsigned(public.publicExponent)))
+            }))) }.toString()
+            val issuer = "https://fake-idp.test/realms/disposable"
+            val owner = Principal(issuer, "browser-owner", PrincipalKind.HUMAN)
+            val agent = Principal(issuer, "device-agent", PrincipalKind.AGENT)
+            val revoked = mutableSetOf<String>()
+            fun signed(subject: Principal, client: String): String {
+                val header = "{\"alg\":\"RS256\",\"kid\":\"disposable\",\"typ\":\"JWT\"}"
+                val now = System.currentTimeMillis() / 1000
+                val claims = buildJsonObject {
+                    put("iss", issuer); put("aud", "vault-api"); put("sub", subject.subject); put("azp", client)
+                    put("keykeeper_principal_type", subject.kind.name); put("jti", "fake-${UUID.randomUUID()}")
+                    put("nbf", now - 5); put("iat", now - 5); put("exp", now + 300)
+                }
+                val data = b64(header.toByteArray()) + "." + b64(claims.toString().toByteArray())
+                return data + "." + b64(Signature.getInstance("SHA256withRSA").apply {
+                    initSign(pair.private); update(data.toByteArray())
+                }.sign())
+            }
+            val browserToken = signed(owner, "browser")
+            val agentToken = signed(agent, "device")
+            val challenges = mutableMapOf<String, String>()
+            idp.createContext("/protocol/openid-connect/token") { exchange ->
+                val body = exchange.requestBody.readAllBytes().toString(Charsets.UTF_8)
+                val params = body.split('&').associate { part ->
+                    val fields = part.split('=', limit = 2)
+                    fields[0] to URLDecoder.decode(fields[1], Charsets.UTF_8)
+                }
+                val challenge = b64(MessageDigest.getInstance("SHA-256").digest(params.getValue("code_verifier").toByteArray()))
+                val valid = challenges.remove(params["code"]) == challenge && params["grant_type"] == "authorization_code"
+                val payload = (if (valid) "{\"access_token\":\"$browserToken\",\"token_type\":\"Bearer\"}" else "{}").toByteArray()
+                exchange.sendResponseHeaders(if (valid) 200 else 400, payload.size.toLong())
+                exchange.responseBody.use { it.write(payload) }
+            }
+            idp.start()
+            val verifier = OidcIdentityVerifier(issuer, "vault-api", mapOf("browser" to PrincipalKind.HUMAN, "device" to PrincipalKind.AGENT),
+                JwksSource { jwks }, RevocationChecker { jti, _, _ -> jti in revoked })
+            val vault = Vault(OpenBaoStore(bao.base, mount, keys.token), verifier) { }
+            val fakeIdp = URI("http://127.0.0.1:${idp.address.port}")
+            val oauth = object : OAuthCodeClient {
+                override fun authorization(state: String, challenge: String, redirect: URI): URI =
+                    URI("$fakeIdp/protocol/openid-connect/auth?state=$state&code_challenge=$challenge&code_challenge_method=S256")
+                override fun exchange(code: String, verifier: String, redirect: URI): String {
+                    val form = "grant_type=authorization_code&code=$code&code_verifier=$verifier"
+                    val response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(fakeIdp.resolve("/protocol/openid-connect/token"))
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .POST(HttpRequest.BodyPublishers.ofString(form)).build(), HttpResponse.BodyHandlers.ofString())
+                    if (response.statusCode() != 200) throw Denied()
+                    return Json.parseToJsonElement(response.body()).jsonObject.getValue("access_token").jsonPrimitive.content
+                }
+            }
+            fun recipient(p: Principal) = buildJsonObject {
+                put("issuer", p.issuer); put("subject", p.subject); put("kind", p.kind.name)
+            }
+            VaultWeb(vault, browser = BrowserOidc(oauth, vault)).use { web ->
+                web.start()
+                val http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build()
+                val base = "http://127.0.0.1:${web.port}"
+                fun request(path: String, cookie: String? = null, method: String = "GET", body: String? = null,
+                            csrf: String? = null, bearer: String? = null): HttpResponse<String> {
+                    val builder = HttpRequest.newBuilder(URI(base + path))
+                    if (cookie != null) builder.header("Cookie", cookie)
+                    if (csrf != null) { builder.header("Origin", base); builder.header("X-Keykeeper-CSRF", csrf) }
+                    if (bearer != null) builder.header("Authorization", "Bearer $bearer")
+                    if (body != null) builder.header("Content-Type", "application/json")
+                    return http.send(builder.method(method, if (body == null) HttpRequest.BodyPublishers.noBody()
+                        else HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString())
+                }
+                val login = request("/auth/login")
+                assertEquals(303, login.statusCode())
+                val stateCookie = login.headers().allValues("Set-Cookie").single().substringBefore(';')
+                val auth = URI(login.headers().firstValue("Location").orElseThrow())
+                val params = auth.rawQuery.split('&').associate {
+                    val fields = it.split('=', limit = 2)
+                    fields[0] to URLDecoder.decode(fields[1], Charsets.UTF_8)
+                }
+                val code = UUID.randomUUID().toString()
+                challenges[code] = params.getValue("code_challenge")
+                val callback = request("/auth/callback?state=${params.getValue("state")}&code=$code", stateCookie)
+                assertEquals(303, callback.statusCode())
+                val cookie = callback.headers().allValues("Set-Cookie").first { it.startsWith("kk_session=") }.substringBefore(';')
+                val csrf = Json.parseToJsonElement(request("/auth/session", cookie).body()).jsonObject.getValue("csrf").jsonPrimitive.content
+                val fake = "fake-only-${UUID.randomUUID()}"
+                val created = request("/api/items", cookie, "POST", buildJsonObject { put("value", fake) }.toString(), csrf)
+                assertEquals(200, created.statusCode())
+                val id = Json.parseToJsonElement(created.body()).jsonObject.getValue("id").jsonPrimitive.content
+                assertEquals(fake, Json.parseToJsonElement(request("/api/items/$id", cookie).body()).jsonObject.getValue("value").jsonPrimitive.content)
+                assertEquals(403, request("/api/items/$id", bearer = agentToken).statusCode())
+                val share = buildJsonObject {
+                    put("recipient", recipient(agent)); put("rights", JsonArray(listOf(JsonPrimitive("READ"))))
+                }
+                assertEquals(200, request("/api/items/$id/share", cookie, "POST", share.toString(), csrf).statusCode())
+                assertEquals(fake, Json.parseToJsonElement(request("/api/items/$id", bearer = agentToken).body()).jsonObject.getValue("value").jsonPrimitive.content)
+                assertEquals(403, request("/api/items/$id/revoke", cookie, "POST", buildJsonObject { put("recipient", recipient(agent)) }.toString()).statusCode())
+                assertEquals(200, request("/api/items/$id/revoke", cookie, "POST", buildJsonObject { put("recipient", recipient(agent)) }.toString(), csrf).statusCode())
+                assertEquals(403, request("/api/items/$id", bearer = agentToken).statusCode())
+                assertEquals(200, request("/auth/logout", cookie, "POST", csrf = csrf).statusCode())
+                assertEquals(403, request("/api/items/$id", cookie).statusCode())
+            }
+        } finally {
+            idp.stop(0)
+            bao?.close()
             Files.walk(scratch).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
         }
     }

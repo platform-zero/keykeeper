@@ -1,10 +1,11 @@
 let bearer = '';
+let csrf = '';
 const el = id => document.getElementById(id);
 const status = text => { el('status').textContent = text; };
 async function api(path, method = 'GET', payload) {
-  if (!bearer) throw Error('Connect first');
+  if (!bearer && !csrf) throw Error('Sign in or connect first');
   const response = await fetch('/api/items' + path, {
-    method, headers: { Authorization: 'Bearer ' + bearer, ...(payload ? {'Content-Type':'application/json'} : {}) },
+    method, headers: { ...(bearer ? {Authorization: 'Bearer ' + bearer} : {'X-Keykeeper-CSRF': csrf}), ...(payload ? {'Content-Type':'application/json'} : {}) },
     body: payload ? JSON.stringify(payload) : undefined, cache: 'no-store'
   });
   if (!response.ok) throw Error('Request failed (' + response.status + ')');
@@ -15,7 +16,17 @@ async function refresh() {
   const items = await api(''); el('items').replaceChildren(); el('value').textContent = '';
   for (const item of items) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.id; el('items').append(option); }
 }
-el('connect').onclick = () => run(async () => { bearer = el('token').value; el('token').value = ''; await refresh(); });
+el('login').onclick = () => { window.location.assign('/auth/login'); };
+el('logout').onclick = () => run(async () => {
+  if (!csrf) throw Error('No browser session');
+  const response = await fetch('/auth/logout', {method:'POST', headers:{'X-Keykeeper-CSRF': csrf}, cache:'no-store'});
+  if (!response.ok) throw Error('Logout failed');
+  csrf = ''; bearer = ''; el('items').replaceChildren(); el('value').textContent = '';
+});
+el('connect').onclick = () => run(async () => { csrf = ''; bearer = el('token').value; el('token').value = ''; await refresh(); });
+fetch('/auth/session', {cache:'no-store'}).then(async response => {
+  if (response.ok) { csrf = (await response.json()).csrf; bearer = ''; await run(refresh); }
+}).catch(() => {});
 el('read').onclick = () => run(async () => { el('value').textContent = ''; el('value').textContent = (await api('/' + encodeURIComponent(el('items').value))).value; });
 el('create').onclick = () => run(async () => { const value = el('newValue').value; await api('', 'POST', {value}); el('newValue').value = ''; await refresh(); });
 el('edit').onclick = () => run(async () => { await api('/' + encodeURIComponent(el('items').value), 'PUT', {value: el('newValue').value}); el('newValue').value = ''; el('value').textContent = ''; });
