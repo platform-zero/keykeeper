@@ -109,6 +109,33 @@ class VaultSliceTest {
         }
     }
 
+    @Test fun `HTTP rejects malformed inputs and masks storage failures without exposing fake values`() {
+        val store = object : CredentialStore {
+            override fun keys(): List<String> = error("fake upstream $secret")
+            override fun get(id: String): StoredCredential? = null
+            override fun put(item: StoredCredential, expectedVersion: Int): Unit = throw Conflict()
+        }
+        VaultWeb(Vault(store, LocalTestVerifier("012345678901234567890123", owner)) {}).use { web ->
+            web.start()
+            val client = HttpClient.newHttpClient()
+            fun call(method: String, path: String, value: String? = null): HttpResponse<String> {
+                val builder = HttpRequest.newBuilder(URI("http://127.0.0.1:${web.port}$path"))
+                    .header("Authorization", "Bearer 012345678901234567890123")
+                if (value != null) builder.header("Content-Type", "application/json")
+                return client.send(builder.method(method, if (value == null) HttpRequest.BodyPublishers.noBody()
+                    else HttpRequest.BodyPublishers.ofString(value)).build(), HttpResponse.BodyHandlers.ofString())
+            }
+            assertEquals(404, call("GET", "/api/unknown").statusCode())
+            assertEquals(400, call("GET", "/api/items?token=not-allowed").statusCode())
+            assertEquals(400, call("POST", "/api/items", "{}").statusCode())
+            assertEquals(400, call("POST", "/api/items", "{invalid").statusCode())
+            assertEquals(409, call("POST", "/api/items", "{\"value\":\"$secret\"}").statusCode())
+            val failed = call("GET", "/api/items")
+            assertEquals(503, failed.statusCode())
+            assertFalse(failed.body().contains(secret))
+        }
+    }
+
     @Test fun `OpenBao KV v2 wire format uses CAS and opaque record with sanitized upstream errors`() {
         val id = UUID.randomUUID().toString()
         var tokenSeen = false
