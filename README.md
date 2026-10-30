@@ -14,10 +14,26 @@ A Kotlin/JDK 21 loopback web vault and CLI with an OpenBao KV-v2 adapter. **Not 
 ```sh
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 export GRADLE_USER_HOME=/mnt/media/p0-v3/cache/gradle-user
-./gradlew --offline clean test
+./gradlew --offline clean check
 ```
 
-Offline tests exercise authorization/revocation, HTTP bearer failures, two identities using the same API, KV-v2 wire requests/CAS/conflicts using an in-process fake Bao server, and audit redaction. They do **not** prove integration with a real OpenBao/SSO installation.
+JaCoCo 0.8.13 enforces **at least 90% LINE coverage of the entire production bundle** on both `test` and `check`; no production classes are excluded. Report: `build/reports/jacoco/test/html/index.html` and `build/reports/jacoco/test/jacocoTestReport.xml`. As measured by `./gradlew --offline clean check`: **261 covered / 286 total production lines = 91.25874125874125% (91.26%)**. The separate opt-in actual Bao test does not contribute to this offline test figure.
+
+Offline tests exercise authorization/revocation, HTTP bearer failures, two identities using the same API/CLI, local server configuration, KV-v2 wire requests/CAS/conflicts using an in-process fake Bao server, and audit redaction. They do **not** prove integration with a real OpenBao/SSO installation.
+
+## Optional real OpenBao integration test (never automatic)
+
+The unit tests use an **in-process fake Bao HTTP server** to check KV-v2 wire shape; they do not contact OpenBao. `realBaoTest` is a *separate source set/task*, not part of `test`, `check`, or the offline JaCoCo numerator. It requires an operator-provisioned, disposable, loopback-only **real OpenBao** with its own empty KV-v2 mount named `keykeeper-test-*`, a test-only token permitted to list metadata, read/write data and delete metadata on that mount, and explicit opt-in. Never point it at a shared/active service or use real credential values. The test generates a random UUID and fake secret; in `finally` it deletes **only its own UUID** via KV-v2 metadata delete (all versions) and checks absence. If the process is killed, that fake record may need manual cleanup. No OpenBao instance or credentials are included in this repository.
+
+```sh
+export KEYKEEPER_REAL_BAO_DISPOSABLE=YES
+export KEYKEEPER_REAL_BAO_URL=http://127.0.0.1:8200
+export KEYKEEPER_REAL_BAO_MOUNT=keykeeper-test-disposable
+export KEYKEEPER_REAL_BAO_TOKEN='<operator-provided-local-disposable-token>'
+./gradlew --offline realBaoTest -PlocalBaoTest=true
+```
+
+Without the Gradle flag this task is skipped, even if invoked explicitly. Missing environment variables/confirmation or a non-loopback URL fail closed. **Not run here: no disposable real Bao or test token was available.**
 
 ## Optional disposable loopback sandbox (fake values only)
 
