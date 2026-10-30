@@ -23,7 +23,8 @@ class DisposableRaftRestoreTest {
         Files.createDirectories(parent)
         val scratch = Files.createTempDirectory(parent, "keykeeper-")
         val apiPort = ServerSocket(0).use { it.localPort }
-        val clusterPort = ServerSocket(0).use { it.localPort }
+        var clusterPort = ServerSocket(0).use { it.localPort }
+        while (clusterPort == apiPort) clusterPort = ServerSocket(0).use { it.localPort }
         val base = URI("http://127.0.0.1:$apiPort")
         val config = scratch.resolve("bao.hcl")
         Files.writeString(config, """
@@ -37,8 +38,9 @@ class DisposableRaftRestoreTest {
         val process = ProcessBuilder(binary.toString(), "server", "-config=${config}")
             .redirectErrorStream(true).redirectOutput(scratch.resolve("bao-process.log").toFile()).start()
         val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
-        fun call(method: String, path: String, token: String? = null, body: ByteArray? = null): HttpResponse<ByteArray> {
-            val builder = HttpRequest.newBuilder(base.resolve(path)).timeout(Duration.ofSeconds(10))
+        fun call(method: String, path: String, token: String? = null, body: ByteArray? = null,
+                 timeoutSeconds: Long = 10): HttpResponse<ByteArray> {
+            val builder = HttpRequest.newBuilder(base.resolve(path)).timeout(Duration.ofSeconds(timeoutSeconds))
             if (token != null) builder.header("X-Vault-Token", token)
             if (body != null) builder.header("Content-Type", if (path.endsWith("snapshot-force")) "application/octet-stream" else "application/json")
             return client.send(builder.method(method, if (body == null) HttpRequest.BodyPublishers.noBody()
@@ -55,13 +57,17 @@ class DisposableRaftRestoreTest {
         }
         try {
             var ready = false
-            for (attempt in 1..40) {
+            for (attempt in 1..120) {
                 if (!process.isAlive) error("Disposable Bao stopped")
-                if (runCatching { call("GET", "/v1/sys/health") }.isSuccess) { ready = true; break }
+                val health = runCatching { call("GET", "/v1/sys/health").statusCode() }.getOrNull()
+                if (health == 501) { ready = true; break } // fresh, uninitialized node
+                if (health != null && health != 503) check(health == 501) { "Not a fresh disposable Bao node (health=$health)" }
                 Thread.sleep(250)
             }
-            check(ready) { "Disposable Bao did not start" }
-            val init = json(call("PUT", "/v1/sys/init", body = "{\"secret_shares\":1,\"secret_threshold\":1}".toByteArray()))
+            check(ready) { "Disposable Bao did not become uninitialized" }
+            // Initial Raft bootstrap can take longer than a normal KV request. Never retry init:
+            // a timed-out successful init would lose the one-time unseal key in this scratch node.
+            val init = json(call("PUT", "/v1/sys/init", body = "{\"secret_shares\":1,\"secret_threshold\":1}".toByteArray(), timeoutSeconds = 60))
             val unseal = init.getValue("keys_base64").jsonArray.single().jsonPrimitive.content
             val token = init.getValue("root_token").jsonPrimitive.content
             fun unsealIfNeeded() {
@@ -85,21 +91,40 @@ class DisposableRaftRestoreTest {
             val owner = Principal("disposable-issuer", "test-owner", PrincipalKind.HUMAN)
             val agent = Principal(owner.issuer, "test-agent", PrincipalKind.AGENT)
             val vault = Vault(store, LocalTestVerifier("fake-only-token-012345678901234", owner)) { }
-            val item = vault.create(owner, "fake-value-${UUID.randomUUID()}")
+            // A fresh Raft mount can acknowledge creation before KV-v2 CAS writes are ready.
+            // A bounded retry still requires a real create with the same fake value.
+            val fakeValue = "fake-value-${UUID.randomUUID()}"
+            val item = (1..20).firstNotNullOfOrNull {
+                try { vault.create(owner, fakeValue) }
+                catch (_: Conflict) { Thread.sleep(500); null }
+            } ?: error("Disposable KV-v2 mount did not accept CAS create")
             val saved = vault.read(owner, item.id)
             vault.share(owner, item.id, Grant(agent, setOf(Right.READ)))
             assertEquals(saved, vault.read(agent, item.id))
-            val snapshot = call("GET", "/v1/sys/storage/raft/snapshot", token)
+            val snapshot = call("GET", "/v1/sys/storage/raft/snapshot", token, timeoutSeconds = 60)
             assertEquals(200, snapshot.statusCode())
             assertTrue(snapshot.body().isNotEmpty())
             vault.revoke(owner, item.id, agent)
             vault.edit(owner, item.id, "fake-changed")
             assertFailsWith<Denied> { vault.read(agent, item.id) }
             // Force restore is safe ONLY because this process and its Raft directory were created here.
-            val restored = call("POST", "/v1/sys/storage/raft/snapshot-force", token, snapshot.body())
+            val restored = call("POST", "/v1/sys/storage/raft/snapshot-force", token, snapshot.body(), timeoutSeconds = 60)
             assertTrue(restored.statusCode() in setOf(200, 204))
             unsealIfNeeded()
             waitForActive(token)
+            // Health can report active before the restored Raft state is readable. Poll the
+            // *actual* value AND grant through the adapter, never just health or HTTP status.
+            var recovered = false
+            var lastStatus: Int? = null
+            for (attempt in 1..60) {
+                if (!process.isAlive) error("Disposable Bao stopped after restore")
+                lastStatus = runCatching { call("GET", "/v1/$mount/data/${item.id}", token).statusCode() }.getOrNull()
+                if (lastStatus == 200 && runCatching {
+                    vault.read(owner, item.id) == saved && vault.read(agent, item.id) == saved
+                }.getOrDefault(false)) { recovered = true; break }
+                Thread.sleep(500)
+            }
+            assertTrue(recovered, "restored fake value/grant unavailable (last HTTP status=$lastStatus)")
             assertEquals(saved, vault.read(owner, item.id))
             assertEquals(saved, vault.read(agent, item.id))
         } finally {

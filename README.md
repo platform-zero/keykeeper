@@ -45,7 +45,7 @@ export KEYKEEPER_TEST_BAO_BINARY=/path/to/trusted/local/openbao
 ./gradlew --offline raftRestoreTest -PdisposableRaftRestore=true
 ```
 
-**Not run here**: no local OpenBao binary is available. Compilation was tested; functional backup/restore is still unverified.
+**Isolated test result:** with the verified OpenBao **2.7.2** binary at `/mnt/media/p0-v3/cache/openbao/v2.7.2/bin/bao`, the test passed three consecutive forced reruns after fixing readiness. The reported post-restore failure reproduced: health was active while KV read briefly returned unavailable. Further runs exposed slow fresh-node initialization and a transient KV-v2 CAS create conflict immediately after the mount was acknowledged. The test now waits for uninitialized health (501), allows a bounded longer one-shot Raft init/snapshot timeout, retries only the fake CAS create for a bounded period, and after restore waits for the actual fake value **and agent grant** through `OpenBaoStore` and `Vault`; final persistence/access assertions are retained. The separate operator-provided `realBaoTest` (against a pre-existing disposable mount) has not run here; neither test proves a full-stack restore or release.
 
 ## OIDC wiring (configuration contract, not validated with Keycloak)
 
