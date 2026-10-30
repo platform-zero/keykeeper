@@ -47,6 +47,8 @@ class CliTest {
             assertFailsWith<IllegalStateException> { command(personToken, "unknown") }
             assertFailsWith<IllegalArgumentException> { command(personToken, "create", "extra") }
             assertFailsWith<IllegalArgumentException> { cli(listOf("list"), { if (it == "KEYKEEPER_URL") "http://example.com" else personToken }) }
+            assertFailsWith<IllegalStateException> { cli(listOf("list"), { if (it == "KEYKEEPER_TEST_TOKEN") personToken else null }, tokenVariable = "KEYKEEPER_ACCESS_TOKEN") }
+            assertEquals("[]", command(botToken, "list"))
             assertFailsWith<IllegalStateException> { cli(listOf("list"), { null }) }
         }
     }

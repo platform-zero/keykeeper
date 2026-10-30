@@ -31,7 +31,7 @@ class OidcIdentityVerifierTest {
             put("n", encode(unsigned(pub.modulus))); put("e", encode(unsigned(pub.publicExponent)))
         }))) }.toString()
     }
-    private fun verifier(checker: RevocationChecker = RevocationChecker { it in revoked }) = OidcIdentityVerifier(
+    private fun verifier(checker: RevocationChecker = RevocationChecker { jti, _, _ -> jti in revoked }) = OidcIdentityVerifier(
         issuer, audience, clients, JwksSource { source }, checker, Clock.fixed(Instant.ofEpochSecond(now), ZoneOffset.UTC))
     private fun claims(client: String = "web-client", type: String = "HUMAN") = buildJsonObject {
         put("iss", issuer); put("aud", audience); put("sub", "test-subject"); put("azp", client)
@@ -72,7 +72,7 @@ class OidcIdentityVerifierTest {
         assertNull(verifier.verify(token(changed("nbf", JsonPrimitive(now + 300)))))
         revoked += "one-time-test-id"
         assertNull(verifier.verify(token()))
-        assertNull(verifier(RevocationChecker { error("unavailable") }).verify(token()))
+        assertNull(verifier(RevocationChecker { _, _, _ -> error("unavailable") }).verify(token()))
         revoked.clear()
         assertNotNull(verifier.verify(token()))
     }
@@ -120,7 +120,7 @@ class OidcIdentityVerifierTest {
         assertFailsWith<IllegalArgumentException> { PinnedHttpsJwksSource(realm, URI("http://id.example.test/keys")) }
         assertFailsWith<IllegalArgumentException> { PinnedHttpsJwksSource(realm, URI("https://other.test/realms/local/protocol/openid-connect/certs")) }
         assertFailsWith<IllegalArgumentException> { PinnedHttpsJwksSource(realm, URI("$issuer/protocol/openid-connect/certs?x=1")) }
-        assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier("http://id.example.test", audience, clients, JwksSource { source }, RevocationChecker { false }) }
-        assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier(issuer, "", clients, JwksSource { source }, RevocationChecker { false }) }
+        assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier("http://id.example.test", audience, clients, JwksSource { source }, RevocationChecker { _, _, _ -> false }) }
+        assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier(issuer, "", clients, JwksSource { source }, RevocationChecker { _, _, _ -> false }) }
     }
 }

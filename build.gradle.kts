@@ -40,3 +40,19 @@ tasks.register<Test>("realBaoTest") {
     useJUnitPlatform()
     onlyIf { providers.gradleProperty("localBaoTest").orNull == "true" }
 }
+
+// Starts its OWN disposable OpenBao process in build/; never targets an existing cluster.
+val raftRestoreTest by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + configurations.testRuntimeClasspath.get()
+    runtimeClasspath += output + compileClasspath
+}
+configurations[raftRestoreTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
+configurations[raftRestoreTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
+tasks.register<Test>("raftRestoreTest") {
+    group = "verification"
+    description = "Opt-in disposable local Raft snapshot/restore test; starts a separate OpenBao binary"
+    testClassesDirs = raftRestoreTest.output.classesDirs
+    classpath = raftRestoreTest.runtimeClasspath
+    useJUnitPlatform()
+    onlyIf { providers.gradleProperty("disposableRaftRestore").orNull == "true" }
+}

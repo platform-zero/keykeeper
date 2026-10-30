@@ -15,13 +15,16 @@ fun main(args: Array<String>) {
     try {
         when (args.firstOrNull()) {
             "serve" -> {
-                require(args.toList() == listOf("serve", "--local-test")) { "Explicit --local-test required" }
-                val web = serveLocalTest()
+                require(args.toList() in listOf(listOf("serve", "--local-test"), listOf("serve", "--oidc")))
+                val web = if (args[1] == "--oidc") serveOidc() else serveLocalTest()
                 Runtime.getRuntime().addShutdownHook(Thread { web.close() })
-                println("Keykeeper LOCAL TEST at http://127.0.0.1:${web.port}/")
+                println("Keykeeper ${args[1]} loopback at http://127.0.0.1:${web.port}/")
             }
-            "cli" -> cli(args.drop(1))
-            else -> error("Usage: serve --local-test | cli list|read ID|create|edit ID|share ID ISSUER SUBJECT HUMAN|AGENT RIGHTS|revoke ID ISSUER SUBJECT HUMAN|AGENT")
+            "cli" -> {
+                require(args.size > 1 && args[1] in setOf("--oidc", "--local-test"))
+                cli(args.drop(2), tokenVariable = if (args[1] == "--oidc") "KEYKEEPER_ACCESS_TOKEN" else "KEYKEEPER_TEST_TOKEN")
+            }
+            else -> error("Usage: serve --oidc|--local-test | cli --oidc|--local-test list|read ID|create|edit ID|share ID ISSUER SUBJECT HUMAN|AGENT RIGHTS|revoke ID ISSUER SUBJECT HUMAN|AGENT")
         }
     } catch (_: Exception) {
         System.err.println("Keykeeper request/configuration failed (no secret details printed)")
@@ -48,12 +51,35 @@ internal fun serveLocalTest(environment: (String) -> String? = System::getenv, a
     return web
 }
 
+/** Strict production-auth configuration, still loopback-only and not a deployment entry point. */
+internal fun serveOidc(environment: (String) -> String? = System::getenv, audit: AuditSink = AuditSink { event ->
+    println("audit action=${event.action} actor=${event.actorHash} item=${event.itemId} outcome=${event.outcome}")
+}): VaultWeb {
+    val issuer = env("KEYKEEPER_OIDC_ISSUER", environment)
+    val realm = URI(issuer)
+    val humanClient = env("KEYKEEPER_OIDC_HUMAN_CLIENT", environment)
+    val agentClient = env("KEYKEEPER_OIDC_AGENT_CLIENT", environment)
+    require(humanClient != agentClient)
+    val verifier = OidcIdentityVerifier(issuer, env("KEYKEEPER_OIDC_AUDIENCE", environment),
+        mapOf(humanClient to PrincipalKind.HUMAN, agentClient to PrincipalKind.AGENT),
+        PinnedHttpsJwksSource(realm, realm.resolve(issuer.trimEnd('/') + "/protocol/openid-connect/certs")),
+        PinnedKeycloakIntrospection(realm, realm.resolve(issuer.trimEnd('/') + "/protocol/openid-connect/token/introspect"),
+            env("KEYKEEPER_OIDC_INTROSPECTION_CLIENT", environment), env("KEYKEEPER_OIDC_INTROSPECTION_SECRET", environment)))
+    val store = OpenBaoStore(URI(env("KEYKEEPER_BAO_URL", environment)), env("KEYKEEPER_BAO_MOUNT", environment),
+        env("KEYKEEPER_BAO_TOKEN", environment))
+    val port = environment("KEYKEEPER_PORT")?.toInt() ?: 8765
+    require(port in 1..65535)
+    return VaultWeb(Vault(store, verifier, audit), port).also { it.start() }
+}
+
 internal fun cli(args: List<String>, environment: (String) -> String? = System::getenv,
-                 input: Reader = System.`in`.reader(), output: (String) -> Unit = ::println) {
+                 input: Reader = System.`in`.reader(), output: (String) -> Unit = ::println,
+                 tokenVariable: String = "KEYKEEPER_TEST_TOKEN") {
+    require(tokenVariable in setOf("KEYKEEPER_TEST_TOKEN", "KEYKEEPER_ACCESS_TOKEN"))
     val base = URI(environment("KEYKEEPER_URL") ?: "http://127.0.0.1:8765")
     require(base.scheme == "http" && base.host in setOf("127.0.0.1", "localhost", "::1") && base.rawUserInfo == null &&
         base.rawQuery == null && base.rawFragment == null && (base.path == "" || base.path == "/"))
-    val token = env("KEYKEEPER_TEST_TOKEN", environment)
+    val token = env(tokenVariable, environment)
     val path: String
     val method: String
     val payload: JsonElement?

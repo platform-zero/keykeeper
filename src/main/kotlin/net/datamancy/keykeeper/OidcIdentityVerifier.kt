@@ -17,7 +17,7 @@ import java.util.Base64
 /** Pinned JWKS document source. Never derive a key URL from an unverified JWT. */
 fun interface JwksSource { fun document(): String }
 /** Must consult a trusted revocation source for every jti; throwing fails authentication closed. */
-fun interface RevocationChecker { fun isRevoked(jti: String): Boolean }
+fun interface RevocationChecker { fun isRevoked(jti: String, bearer: String, subject: String): Boolean }
 
 /** HTTPS-only pinned Keycloak realm certs endpoint; no redirects, stale-key fallback or token-derived URLs. */
 class PinnedHttpsJwksSource(issuer: URI, jwks: URI) : JwksSource {
@@ -106,7 +106,7 @@ class OidcIdentityVerifier(
         val kind = clients[claims.text("azp")] ?: throw IllegalArgumentException()
         // `keykeeper_principal_type` must be an admin-only signed protocol mapper, never a user-editable attribute.
         require(claims.text("keykeeper_principal_type") == kind.name)
-        require(!revocation.isRevoked(jti))
+        require(!revocation.isRevoked(jti, token, subject))
         return Principal(issuer, subject, kind)
     }
 }
