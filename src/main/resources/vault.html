@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Keykeeper local test vault</title>
+<style>body{font:1rem system-ui;max-width:50rem;margin:2rem auto;padding:0 1rem}label{display:block;margin:.7rem 0}input,textarea,select{font:inherit}textarea{width:100%}button{margin:.3rem}#value{white-space:pre-wrap;overflow-wrap:anywhere}small{display:block}</style>
+<h1>Keykeeper — local test vault</h1><p>Loopback only. No production SSO. Do not enter real credentials.</p>
+<label>Test bearer token <input id="token" type="password" autocomplete="off"></label><button id="connect">Connect / refresh</button>
+<p id="status" role="status"></p><label>Entries <select id="items"></select></label><button id="read">Reveal</button><pre id="value"></pre>
+<h2>Create or edit selected entry</h2><label>Value <textarea id="newValue" rows="3" autocomplete="off"></textarea></label><button id="create">Create</button><button id="edit">Replace selected</button>
+<h2>Share or revoke selected entry</h2><label>Issuer <input id="issuer"></label><label>Subject <input id="subject"></label>
+<label>Kind <select id="kind"><option>HUMAN</option><option>AGENT</option></select></label>
+<label><input id="rightRead" type="checkbox" checked> READ</label><label><input id="rightEdit" type="checkbox"> EDIT</label><label><input id="rightShare" type="checkbox"> SHARE</label>
+<button id="share">Share</button><button id="revoke">Revoke</button>
+<small>Token stays in this page's memory only. Close the tab to discard it. A granted agent uses the same API/CLI as a human.</small>
+<script src="/vault.js"></script></html>

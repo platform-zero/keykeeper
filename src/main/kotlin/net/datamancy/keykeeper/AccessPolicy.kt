@@ -24,9 +24,9 @@ data class CredentialMetadata(
 object AccessPolicy {
     fun may(principal: Principal, item: CredentialMetadata, right: Right): Boolean =
         principal.issuer == item.owner.issuer &&
-            (principal.subject == item.owner.subject || item.grants.any {
+            ((principal.subject == item.owner.subject && principal.kind == item.owner.kind) || item.grants.any {
                 it.recipient.issuer == principal.issuer &&
-                    it.recipient.subject == principal.subject && right in it.rights
+                    it.recipient.subject == principal.subject && it.recipient.kind == principal.kind && right in it.rights
             })
 
     fun share(actor: Principal, item: CredentialMetadata, grant: Grant): CredentialMetadata {
@@ -34,14 +34,14 @@ object AccessPolicy {
         require(grant.rights.all { may(actor, item, it) }) { "Cannot grant rights you do not hold" }
         require(grant.recipient.issuer == item.owner.issuer) { "Cross-issuer grants are not supported" }
         return item.copy(grants = item.grants.filterNot {
-            it.recipient.issuer == grant.recipient.issuer && it.recipient.subject == grant.recipient.subject
+            it.recipient.issuer == grant.recipient.issuer && it.recipient.subject == grant.recipient.subject && it.recipient.kind == grant.recipient.kind
         } + grant)
     }
 
     fun revoke(actor: Principal, item: CredentialMetadata, recipient: Principal): CredentialMetadata {
         require(may(actor, item, Right.SHARE)) { "Revocation requires SHARE permission" }
         return item.copy(grants = item.grants.filterNot {
-            it.recipient.issuer == recipient.issuer && it.recipient.subject == recipient.subject
+            it.recipient.issuer == recipient.issuer && it.recipient.subject == recipient.subject && it.recipient.kind == recipient.kind
         })
     }
 }
