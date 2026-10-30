@@ -203,9 +203,16 @@ class RealKeycloakBaoTest {
             }
             val fakeValue = "fake-only-${UUID.randomUUID()}"
             assertEquals(403, api("", "POST", buildJsonObject { put("value", fakeValue) }.toString()).statusCode())
-            val created = api("", "POST", buildJsonObject { put("value", fakeValue) }.toString(), true)
-            assertEquals(200, created.statusCode())
-            val id = Json.parseToJsonElement(created.body()).jsonObject.getValue("id").jsonPrimitive.content
+            val payload = buildJsonObject { put("value", fakeValue) }.toString()
+            var created: HttpResponse<String>? = null
+            for (attempt in 1..20) {
+                created = api("", "POST", payload, true)
+                if (created.statusCode() != 409) break // fresh KV mount may reject initial CAS=0
+                Thread.sleep(500)
+            }
+            val successful = created ?: error("No disposable KV create response")
+            assertEquals(200, successful.statusCode())
+            val id = Json.parseToJsonElement(successful.body()).jsonObject.getValue("id").jsonPrimitive.content
             val owner = Principal(issuer, humanId, PrincipalKind.HUMAN)
             val agent = Principal(issuer, agentId, PrincipalKind.AGENT)
             val grant = buildJsonObject {
@@ -242,7 +249,7 @@ class RealKeycloakBaoTest {
                     assertEquals(200, approvalResult.statusCode())
                     check(proc.waitFor(40, TimeUnit.SECONDS)) { "Device CLI did not finish" }
                     val output = proc.inputStream.bufferedReader().readText()
-                    if (expectSuccess) { assertEquals(0, proc.exitValue()); assertEquals(fakeValue, output.trim()) }
+                    if (expectSuccess) { assertEquals(0, proc.exitValue()); assertTrue(output.trim() == fakeValue, "agent CLI read mismatch") }
                     else { assertNotEquals(0, proc.exitValue()); assertFalse(output.contains(fakeValue)) }
                     assertFalse(prompt.contains("eyJ")) // no access token in prompts/logs
                 } finally { if (proc.isAlive) proc.destroyForcibly().waitFor() }
@@ -265,17 +272,12 @@ class RealKeycloakBaoTest {
             val restored = restoreTarget.call("POST", "/v1/sys/storage/raft/snapshot-force", targetKeys.token,
                 snapshot.body(), timeoutSeconds = 60)
             assertTrue(restored.statusCode() in setOf(200, 204))
-            restoreTarget.restart()
-            restoreTarget.awaitActive(targetKeys.unseal, baoKeys.unseal)
             val restoredVault = Vault(OpenBaoStore(restoreTarget.base, mount, baoKeys.token), verifier) { }
-            var recovered = false
-            for (attempt in 1..120) {
-                if (runCatching { restoredVault.read(owner, id) == fakeValue && restoredVault.read(agent, id) == fakeValue }.getOrDefault(false)) {
-                    recovered = true; break
-                }
-                Thread.sleep(500)
-            }
-            assertTrue(recovered, "independent Keycloak/Bao target not restored")
+            val probe = { restoredVault.read(owner, id) == fakeValue && restoredVault.read(agent, id) == fakeValue }
+            restoreTarget.awaitRestored("before restart", baoKeys.token, targetKeys.token, baoKeys.unseal, mount, id, probe)
+            restoreTarget.restart()
+            restoreTarget.awaitActive(baoKeys.unseal)
+            restoreTarget.awaitRestored("after restart", baoKeys.token, targetKeys.token, baoKeys.unseal, mount, id, probe)
             restoredWeb = VaultWeb(restoredVault, restoredPort,
                 BrowserOidc(PinnedKeycloakCodeClient(URI(issuer), "browser"), restoredVault)).also { it.start() }
             val targetBrowser = http(true)
@@ -290,8 +292,8 @@ class RealKeycloakBaoTest {
             val targetSession = call(targetBrowser, URI("$targetBase/auth/session"))
             assertEquals(200, targetSession.statusCode())
             val targetCsrf = Json.parseToJsonElement(targetSession.body()).jsonObject.getValue("csrf").jsonPrimitive.content
-            assertEquals(fakeValue, Json.parseToJsonElement(call(targetBrowser, URI("$targetBase/api/items/$id")).body())
-                .jsonObject.getValue("value").jsonPrimitive.content)
+            assertTrue(Json.parseToJsonElement(call(targetBrowser, URI("$targetBase/api/items/$id")).body())
+                .jsonObject.getValue("value").jsonPrimitive.content == fakeValue, "target browser value mismatch")
             deviceCli(true, restoredPort)
             val targetRevoke = HttpRequest.newBuilder(URI("$targetBase/api/items/$id/revoke"))
                 .header("Origin", targetBase).header("X-Keykeeper-CSRF", targetCsrf).header("Content-Type", "application/json")
@@ -300,11 +302,11 @@ class RealKeycloakBaoTest {
                 }.toString())).build()
             assertEquals(200, targetBrowser.send(targetRevoke, HttpResponse.BodyHandlers.ofString()).statusCode())
             deviceCli(false, restoredPort)
-            assertEquals(fakeValue, restoredVault.read(owner, id))
+            assertTrue(restoredVault.read(owner, id) == fakeValue, "target owner after revoke mismatch")
             assertFailsWith<Denied> { restoredVault.read(agent, id) }
             // The source retains its post-snapshot revoke and is not the restored target.
             assertFailsWith<Denied> { vault.read(agent, id) }
-            assertEquals(fakeValue, vault.read(owner, id))
+            assertTrue(vault.read(owner, id) == fakeValue, "source owner value changed during restore")
         } finally {
             restoredWeb?.close()
             web?.close()

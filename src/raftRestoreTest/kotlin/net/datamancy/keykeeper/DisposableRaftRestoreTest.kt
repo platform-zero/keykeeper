@@ -102,6 +102,31 @@ class DisposableRaftRestoreTest {
             }
             error("Disposable Bao did not become active")
         }
+
+        /** A restore POST is acceptance, not durable replay. Gate BOTH sides of a restart on
+         * the source auth state, the disappearance of the target bootstrap token, and app data.
+         * Diagnostics are numeric HTTP statuses only; never include root tokens or secret values. */
+        fun awaitRestored(phase: String, sourceToken: String, targetToken: String, sourceUnseal: String,
+                          mount: String, id: String, probe: () -> Boolean) {
+            fun status(path: String, token: String? = null): Int? =
+                runCatching { call("GET", path, token).statusCode() }.getOrNull()
+            var sourceAuth: Int? = null
+            var targetAuth: Int? = null
+            var kv: Int? = null
+            val seen = mutableMapOf<Int?, Int>()
+            for (attempt in 1..120) {
+                check(alive) { "Disposable Bao stopped in $phase restore phase" }
+                if (health() == 503) awaitActive(sourceUnseal)
+                sourceAuth = status("/v1/auth/token/lookup-self", sourceToken)
+                targetAuth = status("/v1/auth/token/lookup-self", targetToken)
+                kv = status("/v1/$mount/data/$id", sourceToken)
+                seen[kv] = seen.getOrDefault(kv, 0) + 1
+                if (sourceAuth == 200 && targetAuth == 403 && kv == 200 && runCatching(probe).getOrDefault(false)) return
+                Thread.sleep(500)
+            }
+            fail("$phase restore not ready: kv=$kv kvStatuses=$seen health=${health()} " +
+                "sourceAuth=$sourceAuth targetAuth=$targetAuth sourceMount=${status("/v1/sys/mounts/$mount", sourceToken)}")
+        }
     }
 
     @Test fun `restore snapshot to independently initialized fresh Raft target and verify fake value and agent rights`() {
@@ -130,47 +155,41 @@ class DisposableRaftRestoreTest {
                 catch (_: Conflict) { Thread.sleep(500); null }
             } ?: error("Disposable KV-v2 mount did not accept CAS create")
             original.share(owner, item.id, Grant(agent, setOf(Right.READ)))
-            assertEquals(fakeValue, original.read(owner, item.id))
-            assertEquals(fakeValue, original.read(agent, item.id))
+            assertTrue(original.read(owner, item.id) == fakeValue, "source owner value mismatch")
+            assertTrue(original.read(agent, item.id) == fakeValue, "source grant mismatch")
             val snapshot = source.call("GET", "/v1/sys/storage/raft/snapshot", sourceKeys.token, timeoutSeconds = 60)
             assertEquals(200, snapshot.statusCode())
             assertTrue(snapshot.body().isNotEmpty())
             original.revoke(owner, item.id, agent)
             original.edit(owner, item.id, "fake-changed")
             assertFailsWith<Denied> { original.read(agent, item.id) }
-            assertEquals("fake-changed", original.read(owner, item.id))
+            assertTrue(original.read(owner, item.id) == "fake-changed", "source mutation missing")
 
             // A DIFFERENT Raft directory, process, listener and separately generated unseal/root keys.
             target = Node(binary, scratch.resolve("target"), "target-${UUID.randomUUID()}")
             val targetKeys = target.initialize()
             assertNotEquals(source.base, target.base)
-            assertNotEquals(sourceKeys.token, targetKeys.token)
+            assertTrue(sourceKeys.token != targetKeys.token, "disposable root identities must differ")
             assertEquals(404, target.call("GET", "/v1/$mount/data/${item.id}", targetKeys.token).statusCode())
             val restored = target.call("POST", "/v1/sys/storage/raft/snapshot-force", targetKeys.token, snapshot.body(), timeoutSeconds = 60)
             assertTrue(restored.statusCode() in setOf(200, 204))
-            // Reopen the target's OWN restored Raft directory; never restart/reuse source storage.
-            target.restart()
-            target.awaitActive(targetKeys.unseal, sourceKeys.unseal)
+            // POST acceptance can precede Raft replay. Require source-authenticated value AND
+            // restored grant before restarting, otherwise restart can interrupt the commit.
             val recovered = vault(target, sourceKeys.token)
-            var ready = false
-            var lastStatus: Int? = null
-            for (attempt in 1..120) {
-                check(target.alive) { "Disposable restore target stopped" }
-                lastStatus = runCatching { target.call("GET", "/v1/$mount/data/${item.id}", sourceKeys.token).statusCode() }.getOrNull()
-                if (lastStatus == 200 && runCatching {
-                    recovered.read(owner, item.id) == fakeValue && recovered.read(agent, item.id) == fakeValue
-                }.getOrDefault(false)) { ready = true; break }
-                Thread.sleep(500)
-            }
-            assertTrue(ready, "target failed to restore fake value/grant (last HTTP status=$lastStatus)")
-            assertEquals(fakeValue, recovered.read(owner, item.id))
-            assertEquals(fakeValue, recovered.read(agent, item.id))
+            val probe = { recovered.read(owner, item.id) == fakeValue && recovered.read(agent, item.id) == fakeValue }
+            target.awaitRestored("before restart", sourceKeys.token, targetKeys.token, sourceKeys.unseal, mount, item.id, probe)
+            // Restart only the target on its OWN restored Raft directory; source remains live.
+            target.restart()
+            target.awaitActive(sourceKeys.unseal)
+            target.awaitRestored("after restart", sourceKeys.token, targetKeys.token, sourceKeys.unseal, mount, item.id, probe)
+            assertTrue(recovered.read(owner, item.id) == fakeValue, "restored owner value mismatch")
+            assertTrue(recovered.read(agent, item.id) == fakeValue, "restored agent grant mismatch")
             recovered.revoke(owner, item.id, agent)
             assertFailsWith<Denied> { recovered.read(agent, item.id) }
-            assertEquals(fakeValue, recovered.read(owner, item.id))
+            assertTrue(recovered.read(owner, item.id) == fakeValue, "owner value after target revoke mismatch")
             // Source remains independent and retains the post-snapshot revoke/edit.
             assertFailsWith<Denied> { original.read(agent, item.id) }
-            assertEquals("fake-changed", original.read(owner, item.id))
+            assertTrue(original.read(owner, item.id) == "fake-changed", "source mutation changed during restore")
         } finally {
             target?.close()
             source?.close()
@@ -282,16 +301,23 @@ class DisposableRaftRestoreTest {
                 val cookie = callback.headers().allValues("Set-Cookie").first { it.startsWith("kk_session=") }.substringBefore(';')
                 val csrf = Json.parseToJsonElement(request("/auth/session", cookie).body()).jsonObject.getValue("csrf").jsonPrimitive.content
                 val fake = "fake-only-${UUID.randomUUID()}"
-                val created = request("/api/items", cookie, "POST", buildJsonObject { put("value", fake) }.toString(), csrf)
-                assertEquals(200, created.statusCode())
-                val id = Json.parseToJsonElement(created.body()).jsonObject.getValue("id").jsonPrimitive.content
-                assertEquals(fake, Json.parseToJsonElement(request("/api/items/$id", cookie).body()).jsonObject.getValue("value").jsonPrimitive.content)
+                val payload = buildJsonObject { put("value", fake) }.toString()
+                var created: HttpResponse<String>? = null
+                for (attempt in 1..20) {
+                    created = request("/api/items", cookie, "POST", payload, csrf)
+                    if (created.statusCode() != 409) break // fresh mount can transiently reject CAS=0
+                    Thread.sleep(500)
+                }
+                val successful = created ?: error("No disposable KV create response")
+                assertEquals(200, successful.statusCode())
+                val id = Json.parseToJsonElement(successful.body()).jsonObject.getValue("id").jsonPrimitive.content
+                assertTrue(Json.parseToJsonElement(request("/api/items/$id", cookie).body()).jsonObject.getValue("value").jsonPrimitive.content == fake, "browser value mismatch")
                 assertEquals(403, request("/api/items/$id", bearer = agentToken).statusCode())
                 val share = buildJsonObject {
                     put("recipient", recipient(agent)); put("rights", JsonArray(listOf(JsonPrimitive("READ"))))
                 }
                 assertEquals(200, request("/api/items/$id/share", cookie, "POST", share.toString(), csrf).statusCode())
-                assertEquals(fake, Json.parseToJsonElement(request("/api/items/$id", bearer = agentToken).body()).jsonObject.getValue("value").jsonPrimitive.content)
+                assertTrue(Json.parseToJsonElement(request("/api/items/$id", bearer = agentToken).body()).jsonObject.getValue("value").jsonPrimitive.content == fake, "agent value mismatch")
                 assertEquals(403, request("/api/items/$id/revoke", cookie, "POST", buildJsonObject { put("recipient", recipient(agent)) }.toString()).statusCode())
                 assertEquals(200, request("/api/items/$id/revoke", cookie, "POST", buildJsonObject { put("recipient", recipient(agent)) }.toString(), csrf).statusCode())
                 assertEquals(403, request("/api/items/$id", bearer = agentToken).statusCode())
