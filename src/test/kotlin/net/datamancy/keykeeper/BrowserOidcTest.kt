@@ -108,14 +108,14 @@ class BrowserOidcTest {
                 assertEquals("$base/auth/callback", params["redirect_uri"])
                 val code = UUID.randomUUID().toString()
                 expected[code] = params.getValue("code_challenge")
-                val callback = "/auth/callback?state=${params.getValue("state")}&code=$code"
+                val callback = "/auth/callback?state=${params.getValue("state")}&iss=${java.net.URLEncoder.encode(fakeBase.toString(), Charsets.UTF_8)}&code=$code"
                 assertEquals(403, request(callback, "kk_state=wrong").statusCode())
                 // Failed state consumes the one-time attempt: start again.
                 val second = request("/auth/login")
                 val secondCookie = second.headers().allValues("Set-Cookie").single().substringBefore(';')
                 val secondState = query(URI(second.headers().firstValue("Location").orElseThrow()))
                 expected[code] = secondState.getValue("code_challenge")
-                val validCallback = "/auth/callback?state=${secondState.getValue("state")}&code=$code"
+                val validCallback = "/auth/callback?state=${secondState.getValue("state")}&iss=${java.net.URLEncoder.encode(fakeBase.toString(), Charsets.UTF_8)}&code=$code"
                 val success = request(validCallback, secondCookie)
                 assertEquals(303, success.statusCode())
                 val sessionCookie = success.headers().allValues("Set-Cookie").first { it.startsWith("kk_session=") }.substringBefore(';')
@@ -139,6 +139,20 @@ class BrowserOidcTest {
         } finally { idp.stop(0) }
     }
 
+    @Test fun `pinned callback issuer mismatch fails closed and consumes state`() {
+        val oauth = object : OAuthCodeClient {
+            override val expectedIssuer = issuer
+            override fun authorization(state: String, challenge: String, redirect: URI) = URI("https://fake-issuer.test/?state=$state")
+            override fun exchange(code: String, verifier: String, redirect: URI): String = error("must not exchange wrong issuer")
+        }
+        val vault = Vault(Memory(), LocalTestVerifier("disposable-test-token-0123456789", Principal(issuer, "human", PrincipalKind.HUMAN))) { }
+        val browser = BrowserOidc(oauth, vault, clock)
+        val redirect = URI("http://127.0.0.1:8765/auth/callback")
+        val (url, cookie) = browser.begin(redirect)
+        val state = query(url).getValue("state")
+        assertFailsWith<Denied> { browser.finish(state, cookie, "code", redirect, "https://other.test") }
+        assertFailsWith<Denied> { browser.finish(state, cookie, "code", redirect, issuer) }
+    }
     @Test fun `pending state and session expire and cannot be replayed`() {
         val oauth = object : OAuthCodeClient {
             override fun authorization(state: String, challenge: String, redirect: URI) = URI("https://fake-issuer.test/?state=$state")

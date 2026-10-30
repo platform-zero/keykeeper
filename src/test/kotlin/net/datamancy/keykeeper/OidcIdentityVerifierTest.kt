@@ -32,7 +32,7 @@ class OidcIdentityVerifierTest {
         }))) }.toString()
     }
     private fun verifier(checker: RevocationChecker = RevocationChecker { jti, _, _ -> jti in revoked }) = OidcIdentityVerifier(
-        issuer, audience, clients, JwksSource { source }, checker, Clock.fixed(Instant.ofEpochSecond(now), ZoneOffset.UTC))
+        issuer, audience, clients, JwksSource { source }, checker, Clock.fixed(Instant.ofEpochSecond(now), ZoneOffset.UTC), setOf("test-subject"))
     private fun claims(client: String = "web-client", type: String = "HUMAN") = buildJsonObject {
         put("iss", issuer); put("aud", audience); put("sub", "test-subject"); put("azp", client)
         put("keykeeper_principal_type", type); put("jti", "one-time-test-id")
@@ -49,9 +49,15 @@ class OidcIdentityVerifierTest {
     @Test fun `locally signed human and agent tokens require both pinned client and trusted type`() {
         val verifier = verifier()
         assertEquals(Principal(issuer, "test-subject", PrincipalKind.HUMAN), verifier.verify(token()))
+        // Real Keycloak access tokens need not carry nbf; iat still bounds their start.
+        assertNotNull(verifier.verify(token(JsonObject(claims().filterKeys { it != "nbf" }))))
         assertEquals(Principal(issuer, "test-subject", PrincipalKind.AGENT), verifier.verify(token(claims("service-client", "AGENT"))))
         assertNull(verifier.verify(token(claims("web-client", "AGENT"))))
         assertNull(verifier.verify(token(claims("service-client", "HUMAN"))))
+        assertNull(verifier.verify(token(changed("sub", JsonPrimitive("unregistered-agent"))
+            .let { JsonObject(it.toMutableMap().apply {
+                put("azp", JsonPrimitive("service-client")); put("keykeeper_principal_type", JsonPrimitive("AGENT"))
+            }) })))
         assertNull(verifier.verify(token(claims("other-client", "AGENT"))))
         assertNull(verifier.verify(token(changed("keykeeper_principal_type", JsonPrimitive("agent")))))
         assertNull(verifier.verify(token(changed("sub", JsonPrimitive("")))))
@@ -120,6 +126,7 @@ class OidcIdentityVerifierTest {
         assertFailsWith<IllegalArgumentException> { PinnedHttpsJwksSource(realm, URI("http://id.example.test/keys")) }
         assertFailsWith<IllegalArgumentException> { PinnedHttpsJwksSource(realm, URI("https://other.test/realms/local/protocol/openid-connect/certs")) }
         assertFailsWith<IllegalArgumentException> { PinnedHttpsJwksSource(realm, URI("$issuer/protocol/openid-connect/certs?x=1")) }
+        assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier(issuer, audience, clients, JwksSource { source }, RevocationChecker { _, _, _ -> false }) }
         assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier("http://id.example.test", audience, clients, JwksSource { source }, RevocationChecker { _, _, _ -> false }) }
         assertFailsWith<IllegalArgumentException> { OidcIdentityVerifier(issuer, "", clients, JwksSource { source }, RevocationChecker { _, _, _ -> false }) }
     }

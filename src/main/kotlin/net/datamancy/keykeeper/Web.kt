@@ -35,7 +35,7 @@ class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: Bro
         return Json.parseToJsonElement(String(bytes, StandardCharsets.UTF_8)).jsonObject
     }
     private fun cookie(x: HttpExchange, name: String): String? = x.requestHeaders.getFirst("Cookie")?.split(';')
-        ?.map { it.trim().split('=', limit = 2) }?.firstOrNull { it.size == 2 && it[0] == name }?.get(1)
+        ?.map { it.trim().split('=', limit = 2) }?.firstOrNull { it.size == 2 && it[0] == name }?.get(1)?.removeSurrounding("\"")
     private fun redirect(x: HttpExchange, url: String) {
         x.responseHeaders.set("Location", url)
         x.responseHeaders.set("Cache-Control", "no-store")
@@ -54,10 +54,11 @@ class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: Bro
             }
             if (browser != null && x.requestMethod == "GET" && path == "/auth/callback") {
                 val params = x.requestURI.rawQuery?.split('&')?.map { it.split('=', limit = 2) } ?: emptyList()
-                if (params.size != 2 || params.any { it.size != 2 } || params.map { it[0] }.toSet() != setOf("state", "code")) throw Denied()
-                val state = java.net.URLDecoder.decode(params.first { it[0] == "state" }[1], Charsets.UTF_8)
-                val code = java.net.URLDecoder.decode(params.first { it[0] == "code" }[1], Charsets.UTF_8)
-                val session = browser.finish(state, cookie(x, "kk_state"), code, redirectUri)
+                val names = params.map { it[0] }
+                if (params.any { it.size != 2 } || names.distinct().size != names.size ||
+                    !names.containsAll(listOf("state", "code")) || names.any { it !in setOf("state", "code", "iss", "session_state") }) throw Denied()
+                fun param(name: String) = params.firstOrNull { it[0] == name }?.get(1)?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
+                val session = browser.finish(param("state")!!, cookie(x, "kk_state"), param("code")!!, redirectUri, param("iss"))
                 x.responseHeaders.add("Set-Cookie", "kk_state=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0")
                 x.responseHeaders.add("Set-Cookie", "kk_session=$session; HttpOnly; SameSite=Strict; Path=/; Max-Age=900")
                 redirect(x, "/"); return

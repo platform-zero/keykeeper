@@ -63,11 +63,14 @@ internal fun serveOidc(environment: (String) -> String? = System::getenv, audit:
     val humanClient = env("KEYKEEPER_OIDC_HUMAN_CLIENT", environment)
     val agentClient = env("KEYKEEPER_OIDC_AGENT_CLIENT", environment)
     require(humanClient != agentClient)
+    val agentSubjects = env("KEYKEEPER_OIDC_AGENT_SUBJECTS", environment).split(',').map { it.trim() }.toSet()
+    require(agentSubjects.all { runCatching { java.util.UUID.fromString(it).toString() }.getOrNull() == it })
     val verifier = OidcIdentityVerifier(issuer, env("KEYKEEPER_OIDC_AUDIENCE", environment),
         mapOf(humanClient to PrincipalKind.HUMAN, agentClient to PrincipalKind.AGENT),
         PinnedHttpsJwksSource(realm, realm.resolve(issuer.trimEnd('/') + "/protocol/openid-connect/certs")),
         PinnedKeycloakIntrospection(realm, realm.resolve(issuer.trimEnd('/') + "/protocol/openid-connect/token/introspect"),
-            env("KEYKEEPER_OIDC_INTROSPECTION_CLIENT", environment), env("KEYKEEPER_OIDC_INTROSPECTION_SECRET", environment)))
+            env("KEYKEEPER_OIDC_INTROSPECTION_CLIENT", environment), env("KEYKEEPER_OIDC_INTROSPECTION_SECRET", environment)),
+        agentSubjects = agentSubjects)
     val store = OpenBaoStore(URI(env("KEYKEEPER_BAO_URL", environment)), env("KEYKEEPER_BAO_MOUNT", environment),
         env("KEYKEEPER_BAO_TOKEN", environment))
     val port = environment("KEYKEEPER_PORT")?.toInt() ?: 8765

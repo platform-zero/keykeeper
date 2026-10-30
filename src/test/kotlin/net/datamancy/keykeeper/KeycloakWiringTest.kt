@@ -61,6 +61,7 @@ class KeycloakWiringTest {
         val config = mapOf("KEYKEEPER_OIDC_ISSUER" to issuer, "KEYKEEPER_OIDC_AUDIENCE" to "vault-api",
             "KEYKEEPER_OIDC_HUMAN_CLIENT" to "browser", "KEYKEEPER_OIDC_AGENT_CLIENT" to "service",
             "KEYKEEPER_OIDC_INTROSPECTION_CLIENT" to "introspect", "KEYKEEPER_OIDC_INTROSPECTION_SECRET" to "fake-only",
+            "KEYKEEPER_OIDC_AGENT_SUBJECTS" to "00000000-0000-0000-0000-000000000001",
             "KEYKEEPER_BAO_URL" to "http://127.0.0.1:1", "KEYKEEPER_BAO_MOUNT" to "fake-test",
             "KEYKEEPER_BAO_TOKEN" to "fake-only", "KEYKEEPER_PORT" to "$port",
             "KEYKEEPER_TEST_TOKEN" to "012345678901234567890123")

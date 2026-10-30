@@ -50,10 +50,13 @@ class OidcIdentityVerifier(
     private val jwks: JwksSource,
     private val revocation: RevocationChecker,
     private val clock: Clock = Clock.systemUTC(),
+    private val agentSubjects: Set<String> = emptySet(),
 ) : IdentityVerifier {
     init {
         require(issuer.startsWith("https://") && URI(issuer).let { it.host != null && it.rawUserInfo == null && it.rawQuery == null && it.rawFragment == null })
         require(audience.isNotBlank() && clients.isNotEmpty() && clients.keys.all { it.isNotBlank() })
+        require(PrincipalKind.AGENT !in clients.values || agentSubjects.isNotEmpty())
+        require(agentSubjects.all { it.isNotBlank() })
     }
     override fun verify(bearer: String): Principal? = try { validate(bearer) } catch (_: Exception) { null }
 
@@ -96,8 +99,9 @@ class OidcIdentityVerifier(
         require(if (aud is JsonArray) aud.any { it is JsonPrimitive && it.isString && it.content == audience }
             else aud is JsonPrimitive && aud.isString && aud.content == audience)
         val now = clock.instant().epochSecond
-        val nbf = claims.seconds("nbf")
         val iat = claims.seconds("iat")
+        // Keycloak access tokens may omit nbf; if present it must be numeric and valid.
+        val nbf = if (claims.containsKey("nbf")) claims.seconds("nbf") else iat
         val exp = claims.seconds("exp")
         require(nbf <= now && iat <= now && now < exp && exp > nbf && exp - iat in 1..3600)
         val subject = claims.text("sub")
@@ -106,6 +110,7 @@ class OidcIdentityVerifier(
         val kind = clients[claims.text("azp")] ?: throw IllegalArgumentException()
         // `keykeeper_principal_type` must be an admin-only signed protocol mapper, never a user-editable attribute.
         require(claims.text("keykeeper_principal_type") == kind.name)
+        if (kind == PrincipalKind.AGENT) require(subject in agentSubjects)
         require(!revocation.isRevoked(jti, token, subject))
         return Principal(issuer, subject, kind)
     }

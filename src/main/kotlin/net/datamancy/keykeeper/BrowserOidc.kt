@@ -14,12 +14,15 @@ import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
 interface OAuthCodeClient {
+    val expectedIssuer: String? get() = null
     fun authorization(state: String, challenge: String, redirect: URI): URI
     fun exchange(code: String, verifier: String, redirect: URI): String
 }
 
 /** Fixed HTTPS Keycloak realm endpoints. Only authorization code + S256 PKCE, no client secret in browser. */
-class PinnedKeycloakCodeClient internal constructor(issuer: URI, private val clientId: String, private val allowLocalFake: Boolean = false) : OAuthCodeClient {
+class PinnedKeycloakCodeClient internal constructor(issuer: URI, private val clientId: String, private val allowLocalFake: Boolean) : OAuthCodeClient {
+    constructor(issuer: URI, clientId: String) : this(issuer, clientId, false)
+    override val expectedIssuer = issuer.toString()
     init {
         require(issuer.host != null && issuer.rawUserInfo == null && issuer.rawQuery == null && issuer.rawFragment == null && clientId.isNotBlank())
         require(issuer.scheme == "https" || (allowLocalFake && issuer.scheme == "http" && issuer.host == "127.0.0.1"))
@@ -68,8 +71,9 @@ class BrowserOidc(private val oauth: OAuthCodeClient, private val vault: Vault, 
         val challenge = Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()))
         return oauth.authorization(state, challenge, redirect) to browser
     }
-    fun finish(state: String, browser: String?, code: String, redirect: URI): String {
+    fun finish(state: String, browser: String?, code: String, redirect: URI, issuer: String? = null): String {
         val attempt = pending.remove(state) ?: throw Denied() // one time, including failed exchange
+        if (oauth.expectedIssuer != null && issuer != oauth.expectedIssuer) throw Denied()
         if (!valid(attempt.created) || browser == null || !MessageDigest.isEqual(attempt.browser.toByteArray(), browser.toByteArray()) || code.isBlank()) throw Denied()
         val token = oauth.exchange(code, attempt.verifier, redirect)
         vault.authenticate(token) // full JWT signature, issuer, client/kind, expiry and introspection

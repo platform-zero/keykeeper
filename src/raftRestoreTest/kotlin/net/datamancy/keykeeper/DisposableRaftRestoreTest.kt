@@ -24,9 +24,9 @@ import kotlin.test.*
 
 /** Two separately initialized, locally launched Raft clusters. Never accepts an existing Bao URL. */
 class DisposableRaftRestoreTest {
-    private data class Keys(val unseal: String, val token: String)
+    internal data class Keys(val unseal: String, val token: String)
 
-    private class Node(private val binary: Path, private val directory: Path, name: String) : AutoCloseable {
+    internal class Node(private val binary: Path, private val directory: Path, name: String) : AutoCloseable {
         private fun port() = ServerSocket(0).use { it.localPort }
         private val apiPort = port()
         private val clusterPort = generateSequence { port() }.first { it != apiPort }
@@ -235,7 +235,7 @@ class DisposableRaftRestoreTest {
             }
             idp.start()
             val verifier = OidcIdentityVerifier(issuer, "vault-api", mapOf("browser" to PrincipalKind.HUMAN, "device" to PrincipalKind.AGENT),
-                JwksSource { jwks }, RevocationChecker { jti, _, _ -> jti in revoked })
+                JwksSource { jwks }, RevocationChecker { jti, _, _ -> jti in revoked }, agentSubjects = setOf(agent.subject))
             val vault = Vault(OpenBaoStore(bao.base, mount, keys.token), verifier) { }
             val fakeIdp = URI("http://127.0.0.1:${idp.address.port}")
             val oauth = object : OAuthCodeClient {

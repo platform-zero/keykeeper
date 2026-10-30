@@ -10,6 +10,21 @@ import java.io.StringReader
 import kotlin.test.*
 
 class DeviceOidcTest {
+    @Test fun `disabled device grant fails closed without accepting or printing tokens`() {
+        val idp = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        idp.createContext("/protocol/openid-connect/auth/device") { exchange ->
+            exchange.requestBody.close()
+            val bytes = "{\"error\":\"unauthorized_client\"}".toByteArray()
+            exchange.sendResponseHeaders(400, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        idp.start()
+        try {
+            val prompts = mutableListOf<String>()
+            assertFailsWith<Denied> { DeviceOidc(URI("http://127.0.0.1:${idp.address.port}"), "agent", true).login(prompts::add) }
+            assertTrue(prompts.isEmpty())
+        } finally { idp.stop(0) }
+    }
     @Test fun `device flow uses disposable fake IdP, returns token in memory and CLI needs no token argument or environment`() {
         val fakeToken = "signed-fake-agent-token-012345678901234"
         var polls = 0
