@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Keykeeper local test vault</title>
-<style>body{font:1rem system-ui;max-width:50rem;margin:2rem auto;padding:0 1rem}label{display:block;margin:.7rem 0}input,textarea,select{font:inherit}textarea{width:100%}button{margin:.3rem}#value{white-space:pre-wrap;overflow-wrap:anywhere}small{display:block}</style>
-<h1>Keykeeper — local test vault</h1><p>Loopback only. No production SSO. Do not enter real credentials.</p>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Keykeeper</title>
+<link rel="stylesheet" href="/vault.css">
+<h1>Keykeeper</h1><p>Use synthetic credentials in staging. Production rollout requires independent review.</p>
 <button id="login">Sign in with Keycloak (OIDC mode)</button><button id="logout">Sign out</button>
 <label>LOCAL TEST bearer token only <input id="token" type="password" autocomplete="off"></label><button id="connect">Connect / refresh</button>
 <p id="status" role="status"></p><label>Entries <select id="items"></select></label><button id="read">Reveal</button><pre id="value"></pre>

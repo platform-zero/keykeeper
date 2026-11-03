@@ -18,8 +18,9 @@ fun main(args: Array<String>) {
                 require(args.toList() in listOf(listOf("serve", "--local-test"), listOf("serve", "--oidc")))
                 val web = if (args[1] == "--oidc") serveOidc() else serveLocalTest()
                 Runtime.getRuntime().addShutdownHook(Thread { web.close() })
-                println("Keykeeper ${args[1]} loopback at http://127.0.0.1:${web.port}/")
+                println("Keykeeper ${args[1]} at ${web.origin}/")
             }
+            "probe" -> { require(args.size == 1); probeHttps() }
             "cli" -> {
                 require(args.size > 1 && args[1] in setOf("--device", "--oidc", "--local-test"))
                 cli(args.drop(2), tokenVariable = if (args[1] == "--local-test") "KEYKEEPER_TEST_TOKEN" else "KEYKEEPER_ACCESS_TOKEN",
@@ -38,6 +39,7 @@ fun main(args: Array<String>) {
 internal fun serveLocalTest(environment: (String) -> String? = System::getenv, audit: AuditSink = AuditSink { event ->
     println("audit action=${event.action} actor=${event.actorHash} item=${event.itemId} outcome=${event.outcome}")
 }): VaultWeb {
+    require(environment("KEYKEEPER_PUBLIC_ORIGIN") == null) { "External serving requires OIDC and TLS" }
     val principal = Principal(env("KEYKEEPER_TEST_ISSUER", environment), env("KEYKEEPER_TEST_SUBJECT", environment),
         PrincipalKind.valueOf(env("KEYKEEPER_TEST_KIND", environment)))
     val store = OpenBaoStore(URI(env("KEYKEEPER_BAO_URL", environment)), env("KEYKEEPER_BAO_MOUNT", environment),
@@ -54,7 +56,7 @@ internal fun serveLocalTest(environment: (String) -> String? = System::getenv, a
     return web
 }
 
-/** Strict production-auth configuration, still loopback-only and not a deployment entry point. */
+/** OIDC serving: loopback HTTP by default, explicit direct HTTPS for a configured deployment. */
 internal fun serveOidc(environment: (String) -> String? = System::getenv, audit: AuditSink = AuditSink { event ->
     println("audit action=${event.action} actor=${event.actorHash} item=${event.itemId} outcome=${event.outcome}")
 }): VaultWeb {
@@ -72,12 +74,20 @@ internal fun serveOidc(environment: (String) -> String? = System::getenv, audit:
             env("KEYKEEPER_OIDC_INTROSPECTION_CLIENT", environment), env("KEYKEEPER_OIDC_INTROSPECTION_SECRET", environment)),
         agentSubjects = agentSubjects)
     val store = OpenBaoStore(URI(env("KEYKEEPER_BAO_URL", environment)), env("KEYKEEPER_BAO_MOUNT", environment),
-        env("KEYKEEPER_BAO_TOKEN", environment))
+        env("KEYKEEPER_BAO_TOKEN", environment),
+        allowRemoteHttps = environment("KEYKEEPER_BAO_REMOTE_HTTPS")?.toBooleanStrict() ?: false)
     val port = environment("KEYKEEPER_PORT")?.toInt() ?: 8765
     require(port in 1..65535)
     val vault = Vault(store, verifier, audit)
     val browser = BrowserOidc(PinnedKeycloakCodeClient(realm, humanClient), vault)
-    return VaultWeb(vault, port, browser).also { it.start() }
+    val origin = environment("KEYKEEPER_PUBLIC_ORIGIN")
+    val cert = environment("KEYKEEPER_TLS_CERTIFICATE")
+    val key = environment("KEYKEEPER_TLS_PRIVATE_KEY")
+    val https = if (origin == null) {
+        require(cert == null && key == null)
+        null
+    } else HttpsEndpoint.load(URI(origin), java.nio.file.Path.of(requireNotNull(cert)), java.nio.file.Path.of(requireNotNull(key)))
+    return VaultWeb(vault, port, browser, https).also { it.start() }
 }
 
 internal fun cli(args: List<String>, environment: (String) -> String? = System::getenv,
@@ -85,7 +95,9 @@ internal fun cli(args: List<String>, environment: (String) -> String? = System::
                  tokenVariable: String = "KEYKEEPER_TEST_TOKEN", tokenProvider: (() -> String)? = null) {
     require(tokenVariable in setOf("KEYKEEPER_TEST_TOKEN", "KEYKEEPER_ACCESS_TOKEN"))
     val base = URI(environment("KEYKEEPER_URL") ?: "http://127.0.0.1:8765")
-    require(base.scheme == "http" && base.host in setOf("127.0.0.1", "localhost", "::1") && base.rawUserInfo == null &&
+    val remoteHttps = environment("KEYKEEPER_REMOTE_HTTPS")?.toBooleanStrict() ?: false
+    require(((base.scheme == "http" && base.host in setOf("127.0.0.1", "localhost", "::1")) ||
+        (base.scheme == "https" && base.host != null && remoteHttps)) && base.rawUserInfo == null &&
         base.rawQuery == null && base.rawFragment == null && (base.path == "" || base.path == "/"))
     val token = tokenProvider?.invoke() ?: env(tokenVariable, environment)
     val path: String
@@ -122,6 +134,14 @@ internal fun cli(args: List<String>, environment: (String) -> String? = System::
     require(response.statusCode() == 200) { "Request failed" }
     if (args[0] == "read") output(Json.parseToJsonElement(response.body()).jsonObject.getValue("value").jsonPrimitive.content)
     else output(response.body())
+}
+
+/** Transport readiness only; native vault operations separately establish unsealed backend availability. */
+internal fun probeHttps(environment: (String) -> String? = System::getenv, http: HttpClient = HttpClient.newHttpClient()) {
+    val origin = URI(env("KEYKEEPER_PUBLIC_ORIGIN", environment))
+    require(origin.scheme == "https" && origin.host != null && origin.rawUserInfo == null && origin.rawQuery == null && origin.rawFragment == null && origin.rawPath.isEmpty())
+    val response = http.send(HttpRequest.newBuilder(origin.resolve("/")).timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.discarding())
+    require(response.statusCode() == 200)
 }
 
 private fun id(value: String): String {

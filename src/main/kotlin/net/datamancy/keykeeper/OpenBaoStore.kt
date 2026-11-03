@@ -7,15 +7,17 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
 
-/** KV-v2 data and metadata API; deliberately restricted to loopback for this local/test slice. */
-class OpenBaoStore(base: URI, private val mount: String, private val token: String) : CredentialStore {
+/** KV-v2 API. Remote endpoints require explicit opt-in and native verified HTTPS; redirects stay disabled. */
+class OpenBaoStore(base: URI, private val mount: String, private val token: String,
+                   allowRemoteHttps: Boolean = false) : CredentialStore {
     init {
-        require(base.scheme in setOf("http", "https") && base.host in setOf("localhost", "127.0.0.1", "::1") &&
+        val loopback = base.host in setOf("localhost", "127.0.0.1", "::1")
+        require(base.scheme in setOf("http", "https") && (loopback || (allowRemoteHttps && base.scheme == "https" && !base.host.isNullOrBlank())) &&
             base.rawUserInfo == null && base.rawQuery == null && base.rawFragment == null && (base.path == "" || base.path == "/"))
         require(mount.matches(Regex("[a-zA-Z0-9_-]+")) && token.isNotBlank())
     }
     private val root = base.toString().trimEnd('/') + "/v1/$mount/"
-    private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
+    private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).followRedirects(HttpClient.Redirect.NEVER).build()
     private val json = Json
 
     private fun request(method: String, path: String, body: String? = null): HttpResponse<String> {
@@ -25,6 +27,10 @@ class OpenBaoStore(base: URI, private val mount: String, private val token: Stri
         val req = builder.method(method, if (body == null) HttpRequest.BodyPublishers.noBody() else HttpRequest.BodyPublishers.ofString(body)).build()
         // Never propagate HTTP errors containing token/value or upstream response bodies.
         return try { client.send(req, HttpResponse.BodyHandlers.ofString()) }
+        catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("OpenBao request interrupted; outcome unknown")
+        }
         catch (_: Exception) { throw IllegalStateException("OpenBao unavailable") }
     }
 

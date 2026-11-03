@@ -17,13 +17,14 @@ data class CredentialMetadata(
     val id: String,
     val owner: Principal,
     val grants: List<Grant> = emptyList(),
+    val retired: Boolean = false,
 ) {
     init { require(id.isNotBlank()) }
 }
 
 object AccessPolicy {
     fun may(principal: Principal, item: CredentialMetadata, right: Right): Boolean =
-        principal.issuer == item.owner.issuer &&
+        !item.retired && principal.issuer == item.owner.issuer &&
             ((principal.subject == item.owner.subject && principal.kind == item.owner.kind) || item.grants.any {
                 it.recipient.issuer == principal.issuer &&
                     it.recipient.subject == principal.subject && it.recipient.kind == principal.kind && right in it.rights

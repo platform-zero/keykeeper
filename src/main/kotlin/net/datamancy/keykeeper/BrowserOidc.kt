@@ -63,8 +63,9 @@ class BrowserOidc(private val oauth: OAuthCodeClient, private val vault: Vault, 
     private val sessions = ConcurrentHashMap<String, Entry>()
     private fun nonce(): String = ByteArray(32).also(random::nextBytes).let { Base64.getUrlEncoder().withoutPadding().encodeToString(it) }
     private fun now() = clock.instant().epochSecond
-    private fun valid(created: Long) = now() >= created && now() - created < 900
+    private fun valid(created: Long, lifetime: Long = 900) = now() >= created && now() - created < lifetime
     fun begin(redirect: URI): Pair<URI, String> {
+        pending.entries.removeIf { !valid(it.value.created, 300) }
         require(pending.size < 1000)
         val state = nonce(); val browser = nonce(); val verifier = nonce()
         pending[state] = Pending(verifier, browser, now())
@@ -74,9 +75,10 @@ class BrowserOidc(private val oauth: OAuthCodeClient, private val vault: Vault, 
     fun finish(state: String, browser: String?, code: String, redirect: URI, issuer: String? = null): String {
         val attempt = pending.remove(state) ?: throw Denied() // one time, including failed exchange
         if (oauth.expectedIssuer != null && issuer != oauth.expectedIssuer) throw Denied()
-        if (!valid(attempt.created) || browser == null || !MessageDigest.isEqual(attempt.browser.toByteArray(), browser.toByteArray()) || code.isBlank()) throw Denied()
+        if (!valid(attempt.created, 300) || browser == null || !MessageDigest.isEqual(attempt.browser.toByteArray(), browser.toByteArray()) || code.isBlank()) throw Denied()
         val token = oauth.exchange(code, attempt.verifier, redirect)
         vault.authenticate(token) // full JWT signature, issuer, client/kind, expiry and introspection
+        sessions.entries.removeIf { !valid(it.value.created) }
         require(sessions.size < 1000)
         val sessionId = nonce()
         sessions[sessionId] = Entry(token, nonce(), now())

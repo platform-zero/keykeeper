@@ -76,5 +76,11 @@ class KeycloakWiringTest {
         assertFailsWith<IllegalStateException> {
             serveOidc((config - "KEYKEEPER_OIDC_INTROSPECTION_SECRET")::get) {}
         }
+        assertFailsWith<IllegalArgumentException> {
+            serveOidc((config + ("KEYKEEPER_BAO_REMOTE_HTTPS" to "yes"))::get) {}
+        }
+        val remote = config + ("KEYKEEPER_BAO_URL" to "https://bao.invalid:8200")
+        assertFailsWith<IllegalArgumentException> { serveOidc(remote::get) {} }
+        serveOidc((remote + ("KEYKEEPER_BAO_REMOTE_HTTPS" to "true"))::get) {}.use { assertEquals(port, it.port) }
     }
 }

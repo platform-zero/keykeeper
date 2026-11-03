@@ -32,6 +32,7 @@ internal fun JsonObject.principal(): Principal = Principal(getValue("issuer").js
     PrincipalKind.valueOf(getValue("kind").jsonPrimitive.content))
 internal fun CredentialMetadata.toJson(): JsonObject = buildJsonObject {
     put("id", id); put("owner", owner.toJson())
+    if (retired) put("retired", true) // Preserve old wire shape for active records.
     put("grants", JsonArray(grants.map { g -> buildJsonObject {
         put("recipient", g.recipient.toJson()); put("rights", JsonArray(g.rights.map { JsonPrimitive(it.name) }))
     } }))
@@ -41,7 +42,7 @@ internal fun JsonObject.metadata(): CredentialMetadata = CredentialMetadata(
     getValue("grants").jsonArray.map { grant ->
         val g = grant.jsonObject
         Grant(g.getValue("recipient").jsonObject.principal(), g.getValue("rights").jsonArray.map { Right.valueOf(it.jsonPrimitive.content) }.toSet())
-    })
+    }, get("retired")?.jsonPrimitive?.boolean ?: false)
 
 data class StoredCredential(val metadata: CredentialMetadata, val value: String, val version: Int)
 
@@ -104,12 +105,39 @@ class Vault(private val store: CredentialStore, private val verifier: IdentityVe
     fun read(actor: Principal, id: String): String = audited("read", actor, id) {
         val item = load(id); allowed(actor, item, Right.READ); item.value
     }
-    fun edit(actor: Principal, id: String, value: String) = audited("edit", actor, id) {
+    fun edit(actor: Principal, id: String, value: String, expectedVersion: Int? = null) = audited("edit", actor, id) {
         require(value.isNotEmpty() && value.length <= 64_000) { "Invalid value length" }
+        require(expectedVersion == null || expectedVersion > 0) { "Invalid expected version" }
         val item = load(id)
         allowed(actor, item, Right.EDIT)
+        if (expectedVersion != null && item.version != expectedVersion) throw Conflict()
         store.put(item.copy(value = value), item.version)
     }
+
+    fun version(actor: Principal, id: String): Int = audited("version", actor, id) {
+        val item = load(id)
+        allowed(actor, item, Right.READ)
+        item.version
+    }
+    /** Rotation is an owner-only replacement that revokes all prior delegations atomically. */
+    fun rotate(actor: Principal, id: String, value: String): CredentialMetadata = audited("rotate", actor, id) {
+        require(value.isNotEmpty() && value.length <= 64_000) { "Invalid value length" }
+        val item = load(id)
+        if (actor != item.metadata.owner || item.metadata.retired) throw Denied()
+        val metadata = item.metadata.copy(grants = emptyList())
+        store.put(item.copy(metadata = metadata, value = value), item.version)
+        metadata
+    }
+
+    /** Logical retirement, not destruction of historical Bao KV versions or upstream revocation. */
+    fun retire(actor: Principal, id: String): CredentialMetadata = audited("retire", actor, id) {
+        val item = load(id)
+        if (actor != item.metadata.owner || item.metadata.retired) throw Denied()
+        val metadata = item.metadata.copy(grants = emptyList(), retired = true)
+        store.put(item.copy(metadata = metadata, value = ""), item.version)
+        metadata
+    }
+
     fun share(actor: Principal, id: String, grant: Grant): CredentialMetadata = audited("share", actor, id) {
         val item = load(id)
         if (!AccessPolicy.may(actor, item.metadata, Right.SHARE)) throw Denied()

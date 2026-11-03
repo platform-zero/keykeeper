@@ -2,20 +2,38 @@ package net.datamancy.keykeeper
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import com.sun.net.httpserver.HttpsServer
+import com.sun.net.httpserver.HttpsConfigurator
+import com.sun.net.httpserver.HttpsParameters
 import kotlinx.serialization.json.*
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.Executors
 
-/** Loopback-only API and minimal vault. Token is supplied in Authorization, never URL/cookie. */
-class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: BrowserOidc? = null) : AutoCloseable {
+/** HTTP stays loopback-only. External serving requires an explicit TLS endpoint; no proxy header inference. */
+class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: BrowserOidc? = null,
+               private val https: HttpsEndpoint? = null) : AutoCloseable {
     private val executor = Executors.newFixedThreadPool(4)
-    private val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 16).apply {
+    private val server: HttpServer = (if (https == null) HttpServer.create(InetSocketAddress("127.0.0.1", port), 16) else {
+        require(port == https.origin.port)
+        HttpsServer.create(InetSocketAddress("0.0.0.0", port), 16).apply {
+            httpsConfigurator = object : HttpsConfigurator(https.context) {
+                override fun configure(parameters: HttpsParameters) {
+                    parameters.setSSLParameters(https.context.defaultSSLParameters.apply { protocols = arrayOf("TLSv1.3", "TLSv1.2") })
+                }
+            }
+        }
+    }).apply {
         createContext("/") { exchange -> handle(exchange) }
         this.executor = this@VaultWeb.executor
     }
     val port: Int get() = server.address.port
+    val origin: String get() = https?.origin?.toString() ?: "http://127.0.0.1:$port"
+    private val stateCookie = if (https == null) "kk_state" else "__Host-kk_state"
+    private val sessionCookie = if (https == null) "kk_session" else "__Host-kk_session"
+    private val statePath = if (https == null) "/auth" else "/"
+    private val secure = if (https == null) "" else "; Secure"
     fun start() = server.start()
     override fun close() { server.stop(0); executor.shutdownNow() }
 
@@ -42,14 +60,15 @@ class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: Bro
         x.responseHeaders.set("Referrer-Policy", "no-referrer")
         x.sendResponseHeaders(303, -1)
     }
-    private fun sameOrigin(x: HttpExchange): Boolean = x.requestHeaders.getFirst("Origin") == "http://127.0.0.1:$port"
+    private fun sameOrigin(x: HttpExchange): Boolean = x.requestHeaders.getFirst("Origin") == origin
     private fun handle(x: HttpExchange) {
         try {
+            if (https != null && x.requestHeaders.getFirst("Host") != https.origin.rawAuthority) throw Denied()
             val path = x.requestURI.rawPath
-            val redirectUri = java.net.URI("http://127.0.0.1:$port/auth/callback")
+            val redirectUri = java.net.URI("$origin/auth/callback")
             if (browser != null && x.requestMethod == "GET" && path == "/auth/login" && x.requestURI.rawQuery == null) {
                 val (url, stateCookie) = browser.begin(redirectUri)
-                x.responseHeaders.add("Set-Cookie", "kk_state=$stateCookie; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=300")
+                x.responseHeaders.add("Set-Cookie", "${this.stateCookie}=$stateCookie; HttpOnly; SameSite=Lax; Path=$statePath; Max-Age=300$secure")
                 redirect(x, url.toString()); return
             }
             if (browser != null && x.requestMethod == "GET" && path == "/auth/callback") {
@@ -58,32 +77,35 @@ class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: Bro
                 if (params.any { it.size != 2 } || names.distinct().size != names.size ||
                     !names.containsAll(listOf("state", "code")) || names.any { it !in setOf("state", "code", "iss", "session_state") }) throw Denied()
                 fun param(name: String) = params.firstOrNull { it[0] == name }?.get(1)?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
-                val session = browser.finish(param("state")!!, cookie(x, "kk_state"), param("code")!!, redirectUri, param("iss"))
-                x.responseHeaders.add("Set-Cookie", "kk_state=; HttpOnly; SameSite=Lax; Path=/auth; Max-Age=0")
-                x.responseHeaders.add("Set-Cookie", "kk_session=$session; HttpOnly; SameSite=Strict; Path=/; Max-Age=900")
+                val session = browser.finish(param("state")!!, cookie(x, stateCookie), param("code")!!, redirectUri, param("iss"))
+                x.responseHeaders.add("Set-Cookie", "$stateCookie=; HttpOnly; SameSite=Lax; Path=$statePath; Max-Age=0$secure")
+                x.responseHeaders.add("Set-Cookie", "$sessionCookie=$session; HttpOnly; SameSite=Strict; Path=/; Max-Age=900$secure")
                 redirect(x, "/"); return
             }
             if (browser != null && path == "/auth/session" && x.requestMethod == "GET" && x.requestURI.rawQuery == null) {
-                val session = browser.session(cookie(x, "kk_session")) ?: throw Denied()
+                val session = browser.session(cookie(x, sessionCookie)) ?: throw Denied()
                 vault.authenticate(session.token) // fail closed if revoked/expired since login
                 reply(x, 200, buildJsonObject { put("csrf", session.csrf) }.toString()); return
             }
             if (browser != null && path == "/auth/logout" && x.requestMethod == "POST" && x.requestURI.rawQuery == null) {
-                val session = browser.session(cookie(x, "kk_session")) ?: throw Denied()
+                val session = browser.session(cookie(x, sessionCookie)) ?: throw Denied()
                 if (!sameOrigin(x) || x.requestHeaders.getFirst("X-Keykeeper-CSRF") != session.csrf) throw Denied()
-                browser.logout(cookie(x, "kk_session"))
-                x.responseHeaders.add("Set-Cookie", "kk_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+                browser.logout(cookie(x, sessionCookie))
+                x.responseHeaders.add("Set-Cookie", "$sessionCookie=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0$secure")
                 reply(x, 200, "{}"); return
             }
             if (x.requestURI.rawQuery != null) { reply(x, 400, "{}", "application/json"); return }
             if (x.requestMethod == "GET" && path == "/") {
                 reply(x, 200, javaClass.getResource("/vault.html")!!.readText(), "text/html"); return
             }
+            if (x.requestMethod == "GET" && path == "/vault.css") {
+                reply(x, 200, javaClass.getResource("/vault.css")!!.readText(), "text/css"); return
+            }
             if (x.requestMethod == "GET" && path == "/vault.js") {
                 reply(x, 200, javaClass.getResource("/vault.js")!!.readText(), "text/javascript"); return
             }
             val auth = x.requestHeaders.getFirst("Authorization")
-            val session = if (auth == null) browser?.session(cookie(x, "kk_session")) else null
+            val session = if (auth == null) browser?.session(cookie(x, sessionCookie)) else null
             val bearer = if (auth != null) {
                 if (!auth.startsWith("Bearer ") || auth.length > 4096) throw Denied()
                 auth.removePrefix("Bearer ")
@@ -101,8 +123,17 @@ class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: Bro
                 parts.size == 3 && parts.take(2) == listOf("api", "items") && x.requestMethod == "GET" ->
                     buildJsonObject { put("value", vault.read(actor, parts[2])) }
                 parts.size == 3 && parts.take(2) == listOf("api", "items") && x.requestMethod == "PUT" -> {
-                    vault.edit(actor, parts[2], body(x).getValue("value").jsonPrimitive.content)
+                    val data = body(x)
+                    vault.edit(actor, parts[2], data.getValue("value").jsonPrimitive.content, data["expectedVersion"]?.jsonPrimitive?.int)
                     buildJsonObject { put("updated", true) }
+                }
+                parts.size == 4 && parts.take(2) == listOf("api", "items") && x.requestMethod == "GET" && parts[3] == "version" ->
+                    buildJsonObject { put("version", vault.version(actor, parts[2])) }
+                parts.size == 4 && parts.take(2) == listOf("api", "items") && x.requestMethod == "POST" && parts[3] == "rotate" ->
+                    vault.rotate(actor, parts[2], body(x).getValue("value").jsonPrimitive.content).toJson()
+                parts.size == 4 && parts.take(2) == listOf("api", "items") && x.requestMethod == "POST" && parts[3] == "retire" -> {
+                    require(body(x).isEmpty())
+                    vault.retire(actor, parts[2]).toJson()
                 }
                 parts.size == 4 && parts.take(2) == listOf("api", "items") && x.requestMethod == "POST" && parts[3] == "share" -> {
                     val data = body(x)

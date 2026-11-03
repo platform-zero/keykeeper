@@ -187,6 +187,11 @@ class VaultSliceTest {
             val error = assertFailsWith<Conflict> { adapter.put(item, 0) }
             assertFalse(error.toString().contains(secret))
             assertFailsWith<IllegalArgumentException> { OpenBaoStore(URI("http://example.com"), "test", "token") }
+            assertFailsWith<IllegalArgumentException> { OpenBaoStore(URI("https://bao:8200"), "test", "token") }
+            OpenBaoStore(URI("https://bao:8200"), "test", "token", allowRemoteHttps = true)
+            for (url in listOf("http://bao:8200", "https://user:pass@bao", "https://bao/path", "https://bao?query", "https://bao#fragment", "https:/missing")) {
+                assertFailsWith<IllegalArgumentException> { OpenBaoStore(URI(url), "test", "token", allowRemoteHttps = true) }
+            }
         } finally { mock.stop(0) }
     }
 }
