@@ -51,14 +51,21 @@ class OidcIdentityVerifier(
     private val revocation: RevocationChecker,
     private val clock: Clock = Clock.systemUTC(),
     private val agentSubjects: Set<String> = emptySet(),
+    private val expectedGeneration: String? = null,
 ) : IdentityVerifier {
     init {
         require(issuer.startsWith("https://") && URI(issuer).let { it.host != null && it.rawUserInfo == null && it.rawQuery == null && it.rawFragment == null })
         require(audience.isNotBlank() && clients.isNotEmpty() && clients.keys.all { it.isNotBlank() })
         require(PrincipalKind.AGENT !in clients.values || agentSubjects.isNotEmpty())
         require(agentSubjects.all { it.isNotBlank() })
+        require(expectedGeneration == null || expectedGeneration.matches(Regex("q-[a-f0-9]{12}")))
     }
     override fun verify(bearer: String): Principal? = try { validate(bearer) } catch (_: Exception) { null }
+    /** Only an explicit inactive response from the pinned realm is logout proof; HTTP errors
+     * and malformed replies are NOT evidence that a stolen access token was revoked.
+     */
+    fun explicitlyRevoked(bearer: String): Boolean = try { validate(bearer, expectRevoked = true); true }
+        catch (_: Exception) { false }
 
     private fun decode(input: String): ByteArray {
         require(input.isNotEmpty() && input.matches(Regex("[A-Za-z0-9_-]+")))
@@ -70,7 +77,7 @@ class OidcIdentityVerifier(
         require(!field.isString && field.content.matches(Regex("-?[0-9]+")))
         return field.content.toLong()
     }
-    private fun validate(token: String): Principal {
+    private fun validate(token: String, expectRevoked: Boolean = false): Principal {
         require(token.length <= 16_384)
         val parts = token.split('.')
         require(parts.size == 3 && parts.take(2).all { it.length <= 8192 })
@@ -110,8 +117,9 @@ class OidcIdentityVerifier(
         val kind = clients[claims.text("azp")] ?: throw IllegalArgumentException()
         // `keykeeper_principal_type` must be an admin-only signed protocol mapper, never a user-editable attribute.
         require(claims.text("keykeeper_principal_type") == kind.name)
+        if (expectedGeneration != null) require(claims.text("p0v3_generation") == expectedGeneration)
         if (kind == PrincipalKind.AGENT) require(subject in agentSubjects)
-        require(!revocation.isRevoked(jti, token, subject))
+        require(revocation.isRevoked(jti, token, subject) == expectRevoked)
         return Principal(issuer, subject, kind)
     }
 }

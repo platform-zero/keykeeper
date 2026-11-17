@@ -9,21 +9,12 @@ dependencies {
 }
 application { mainClass.set("net.datamancy.keykeeper.MainKt") }
 jacoco { toolVersion = "0.8.13" }
-tasks.test { useJUnitPlatform(); finalizedBy(tasks.jacocoTestCoverageVerification) }
+tasks.test { useJUnitPlatform() }
 tasks.jacocoTestReport {
     dependsOn(tasks.test)
     reports { xml.required.set(true); html.required.set(true) }
 }
-tasks.jacocoTestCoverageVerification {
-    dependsOn(tasks.jacocoTestReport)
-    violationRules {
-        rule {
-            element = "BUNDLE"
-            limit { counter = "LINE"; value = "COVEREDRATIO"; minimum = "0.90".toBigDecimal() }
-        }
-    }
-}
-tasks.check { dependsOn(tasks.jacocoTestCoverageVerification) }
+// Coverage reports are opt-in diagnostics, not an additional qualification gate.
 
 // Deliberately separate from test/check and JaCoCo's offline unit-test denominator.
 val realBaoTest by sourceSets.creating {

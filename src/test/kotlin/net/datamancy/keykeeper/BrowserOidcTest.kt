@@ -139,6 +139,38 @@ class BrowserOidcTest {
         } finally { idp.stop(0) }
     }
 
+    @Test fun `production browser logout revokes upstream and fails closed on lost acknowledgement`() {
+        val token = "disposable-browser-token-0123456789"
+        val principal = Principal(issuer, "original-user", PrincipalKind.HUMAN)
+        var revoked = false
+        val oauth = object : OAuthCodeClient {
+            override val expectedIssuer = issuer
+            override val requiresUpstreamLogout = true
+            override fun authorization(state: String, challenge: String, redirect: URI) = URI("$issuer/auth?state=$state")
+            override fun exchange(code: String, verifier: String, redirect: URI) = token
+            override fun exchangeGrant(code: String, verifier: String, redirect: URI) = OAuthGrant(token, "private-refresh")
+            override fun revoke(refreshToken: String) { assertEquals("private-refresh", refreshToken); revoked = true }
+        }
+        val vault = Vault(Memory(), IdentityVerifier { if (!revoked && it == token) principal else null }) { }
+        val browser = BrowserOidc(oauth, vault, clock, { revoked })
+        val redirect = URI("https://keeper:8443/auth/callback")
+        val (url, cookie) = browser.begin(redirect)
+        val session = browser.finish(query(url).getValue("state"), cookie, "code", redirect, issuer)
+        browser.logout(session)
+        assertTrue(revoked)
+        assertNull(browser.session(session))
+        assertFailsWith<Denied> { vault.authenticate(token) }
+        val failed = object : OAuthCodeClient by oauth {
+            override fun revoke(refreshToken: String): Unit = error("upstream unavailable")
+        }
+        revoked = false
+        val unsafe = BrowserOidc(failed, vault, clock, { revoked })
+        val (next, nextCookie) = unsafe.begin(redirect)
+        val nextSession = unsafe.finish(query(next).getValue("state"), nextCookie, "code", redirect, issuer)
+        assertFails { unsafe.logout(nextSession) }
+        assertNull(unsafe.session(nextSession))
+    }
+
     @Test fun `pinned callback issuer mismatch fails closed and consumes state`() {
         val oauth = object : OAuthCodeClient {
             override val expectedIssuer = issuer

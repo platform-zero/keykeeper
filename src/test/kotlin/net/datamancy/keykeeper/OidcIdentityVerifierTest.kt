@@ -68,6 +68,23 @@ class OidcIdentityVerifierTest {
         assertNull(verifier.verify(token(changed("aud", JsonArray(listOf(JsonPrimitive("other")))))))
         assertNull(verifier.verify(token(changed("aud", JsonPrimitive(17)))))
     }
+    @Test fun `restored generation denies a still-signed original source bearer`() {
+        val sourceGeneration = "q-111111111111"
+        val targetGeneration = "q-222222222222"
+        val sourceBearer = token(changed("p0v3_generation", JsonPrimitive(sourceGeneration)))
+        val targetBearer = token(changed("p0v3_generation", JsonPrimitive(targetGeneration)))
+        val target = OidcIdentityVerifier(issuer, audience, clients, JwksSource { source },
+            RevocationChecker { _, _, _ -> false }, Clock.fixed(Instant.ofEpochSecond(now), ZoneOffset.UTC),
+            setOf("test-subject"), targetGeneration)
+        assertNull(target.verify(sourceBearer))
+        assertNull(target.verify(token())) // Generation-less legacy credentials are not canonical authority.
+        assertEquals(Principal(issuer, "test-subject", PrincipalKind.HUMAN), target.verify(targetBearer))
+        assertFailsWith<IllegalArgumentException> {
+            OidcIdentityVerifier(issuer, audience, clients, JwksSource { source }, RevocationChecker { _, _, _ -> false },
+                agentSubjects = setOf("test-subject"), expectedGeneration = "other")
+        }
+    }
+
     @Test fun `expiration not-before issued-at lifetime and revocation fail closed`() {
         val verifier = verifier()
         for ((field, value) in listOf("exp" to now, "nbf" to (now + 1), "iat" to (now + 1),
@@ -76,9 +93,12 @@ class OidcIdentityVerifierTest {
         }
         assertNull(verifier.verify(token(changed("exp", JsonPrimitive("9999999999")))))
         assertNull(verifier.verify(token(changed("nbf", JsonPrimitive(now + 300)))))
+        assertFalse(verifier.explicitlyRevoked(token()))
         revoked += "one-time-test-id"
+        assertTrue(verifier.explicitlyRevoked(token()))
         assertNull(verifier.verify(token()))
         assertNull(verifier(RevocationChecker { _, _, _ -> error("unavailable") }).verify(token()))
+        assertFalse(verifier(RevocationChecker { _, _, _ -> error("unavailable") }).explicitlyRevoked(token()))
         revoked.clear()
         assertNotNull(verifier.verify(token()))
     }

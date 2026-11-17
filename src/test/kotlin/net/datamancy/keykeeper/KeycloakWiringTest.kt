@@ -51,10 +51,12 @@ class KeycloakWiringTest {
         body = "{\"active\":false}"
         assertTrue(checker.isRevoked("id1", "fake.bearer", "alice"))
         status = 503
-        assertTrue(checker.isRevoked("id1", "fake.bearer", "alice"))
+        assertFails { checker.isRevoked("id1", "fake.bearer", "alice") }
         status = 200
         body = "x".repeat(65_537)
-        assertTrue(checker.isRevoked("id1", "fake.bearer", "alice"))
+        assertFails { checker.isRevoked("id1", "fake.bearer", "alice") }
+        body = "malformed"
+        assertFails { checker.isRevoked("id1", "fake.bearer", "alice") }
     }
     @Test fun `OIDC server configuration never accepts fake test token even when present`() {
         val port = ServerSocket(0).use { it.localPort }

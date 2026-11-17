@@ -62,6 +62,13 @@ internal fun serveOidc(environment: (String) -> String? = System::getenv, audit:
 }): VaultWeb {
     val issuer = env("KEYKEEPER_OIDC_ISSUER", environment)
     val realm = URI(issuer)
+    val generation = environment("KEYKEEPER_GENERATION_ID")
+    if (realm.host == "auth.datamancy.net" ||
+        environment("KEYKEEPER_PUBLIC_ORIGIN")?.let { URI(it).host == "keykeeper.datamancy.net" } == true) {
+        require(generation != null && generation.matches(Regex("q-[a-f0-9]{12}"))) {
+            "Canonical identity requires an exact generation binding"
+        }
+    }
     val humanClient = env("KEYKEEPER_OIDC_HUMAN_CLIENT", environment)
     val agentClient = env("KEYKEEPER_OIDC_AGENT_CLIENT", environment)
     require(humanClient != agentClient)
@@ -72,14 +79,15 @@ internal fun serveOidc(environment: (String) -> String? = System::getenv, audit:
         PinnedHttpsJwksSource(realm, realm.resolve(issuer.trimEnd('/') + "/protocol/openid-connect/certs")),
         PinnedKeycloakIntrospection(realm, realm.resolve(issuer.trimEnd('/') + "/protocol/openid-connect/token/introspect"),
             env("KEYKEEPER_OIDC_INTROSPECTION_CLIENT", environment), env("KEYKEEPER_OIDC_INTROSPECTION_SECRET", environment)),
-        agentSubjects = agentSubjects)
+        agentSubjects = agentSubjects, expectedGeneration = generation)
     val store = OpenBaoStore(URI(env("KEYKEEPER_BAO_URL", environment)), env("KEYKEEPER_BAO_MOUNT", environment),
         env("KEYKEEPER_BAO_TOKEN", environment),
         allowRemoteHttps = environment("KEYKEEPER_BAO_REMOTE_HTTPS")?.toBooleanStrict() ?: false)
     val port = environment("KEYKEEPER_PORT")?.toInt() ?: 8765
     require(port in 1..65535)
     val vault = Vault(store, verifier, audit)
-    val browser = BrowserOidc(PinnedKeycloakCodeClient(realm, humanClient), vault)
+    val browser = BrowserOidc(PinnedKeycloakCodeClient(realm, humanClient), vault,
+        revocationProof = verifier::explicitlyRevoked)
     val origin = environment("KEYKEEPER_PUBLIC_ORIGIN")
     val cert = environment("KEYKEEPER_TLS_CERTIFICATE")
     val key = environment("KEYKEEPER_TLS_PRIVATE_KEY")
@@ -138,10 +146,26 @@ internal fun cli(args: List<String>, environment: (String) -> String? = System::
 
 /** Transport readiness only; native vault operations separately establish unsealed backend availability. */
 internal fun probeHttps(environment: (String) -> String? = System::getenv, http: HttpClient = HttpClient.newHttpClient()) {
-    val origin = URI(env("KEYKEEPER_PUBLIC_ORIGIN", environment))
-    require(origin.scheme == "https" && origin.host != null && origin.rawUserInfo == null && origin.rawQuery == null && origin.rawFragment == null && origin.rawPath.isEmpty())
-    val response = http.send(HttpRequest.newBuilder(origin.resolve("/")).timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.discarding())
-    require(response.statusCode() == 200)
+    val publicOrigin = URI(env("KEYKEEPER_PUBLIC_ORIGIN", environment))
+    require(publicOrigin.scheme == "https" && publicOrigin.host != null && publicOrigin.rawUserInfo == null &&
+        publicOrigin.rawQuery == null && publicOrigin.rawFragment == null && publicOrigin.rawPath.isEmpty())
+    val origin = environment("KEYKEEPER_PROBE_ORIGIN")?.let { value ->
+        require(publicOrigin.toASCIIString() == "https://keykeeper.datamancy.net" && value == "https://keeper:8443") {
+            "Only the fixed private canonical readiness endpoint is allowed"
+        }
+        URI(value)
+    } ?: publicOrigin
+    require(http.followRedirects() == HttpClient.Redirect.NEVER) { "Readiness cannot follow another origin" }
+    // Normal TLS hostname/CA verification stays enabled; canonical containers mount the sealed trust store.
+    val response = http.send(HttpRequest.newBuilder(origin.resolve("/")).timeout(Duration.ofSeconds(5)).GET().build(),
+        HttpResponse.BodyHandlers.ofInputStream())
+    response.body().use { body ->
+        require(response.statusCode() == 200 && response.headers().firstValue("Content-Type").orElse("").startsWith("text/html"))
+        val bytes = body.readNBytes(16385)
+        require(bytes.size <= 16384 && bytes.decodeToString(throwOnInvalidSequence = true).contains("<title>Keykeeper</title>")) {
+            "Readiness endpoint is not the Keykeeper UI"
+        }
+    }
 }
 
 private fun id(value: String): String {

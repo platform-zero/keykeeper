@@ -17,7 +17,9 @@ data class HttpsEndpoint(val origin: URI, val context: SSLContext) {
     init {
         require(origin.scheme == "https" && origin.host != null && origin.host == origin.host.lowercase() &&
             origin.rawUserInfo == null && origin.rawQuery == null && origin.rawFragment == null &&
-            origin.rawPath.isEmpty() && origin.port in 1..65535) { "An exact HTTPS origin with explicit port is required" }
+            origin.rawPath.isEmpty() && (origin.port in 1..65535 ||
+                (origin.port == -1 && origin.host == "keykeeper.datamancy.net"))) {
+            "An exact HTTPS origin or approved public Keykeeper hostname is required" }
     }
     companion object {
         fun load(origin: URI, certificate: Path, privateKey: Path): HttpsEndpoint {

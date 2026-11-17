@@ -16,7 +16,10 @@ class VaultWeb(private val vault: Vault, port: Int = 0, private val browser: Bro
                private val https: HttpsEndpoint? = null) : AutoCloseable {
     private val executor = Executors.newFixedThreadPool(4)
     private val server: HttpServer = (if (https == null) HttpServer.create(InetSocketAddress("127.0.0.1", port), 16) else {
-        require(port == https.origin.port)
+        // Only the exact public Keykeeper origin may use Caddy's exclusive 443 listener
+        // while the application itself serves authenticated private TLS on 8443.
+        require(port == https.origin.port || (https.origin.host == "keykeeper.datamancy.net" &&
+            https.origin.port == -1 && port == 8443))
         HttpsServer.create(InetSocketAddress("0.0.0.0", port), 16).apply {
             httpsConfigurator = object : HttpsConfigurator(https.context) {
                 override fun configure(parameters: HttpsParameters) {

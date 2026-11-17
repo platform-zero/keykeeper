@@ -104,6 +104,10 @@ class HttpsEndpointTest {
             Files.writeString(bad, "-----BEGIN PRIVATE KEY-----\n" + java.util.Base64.getEncoder().encodeToString(otherKey) + "\n-----END PRIVATE KEY-----\n")
             assertFails { HttpsEndpoint.load(URI("https://localhost:8443"), cert, bad) }
             val vault = Vault(Memory(), LocalTestVerifier("unit-only-token-at-least-24-bytes", Principal("unit", "owner", PrincipalKind.HUMAN))) {}
+            val public = HttpsEndpoint.load(URI("https://keykeeper.datamancy.net"), cert, key)
+            assertEquals("https://keykeeper.datamancy.net", public.origin.toString())
+            assertFails { VaultWeb(vault, 1234, https = public) }
+            assertFailsWith<IllegalArgumentException> { HttpsEndpoint(URI("https://unrelated.datamancy.net"), SSLContext.getDefault()) }
             assertFails { VaultWeb(vault, 1234, https = HttpsEndpoint.load(URI("https://localhost:8443"), cert, key)) }
             assertFails { probeHttps(mapOf("KEYKEEPER_PUBLIC_ORIGIN" to "http://localhost:8443")::get) }
             assertFails { serveLocalTest(mapOf("KEYKEEPER_PUBLIC_ORIGIN" to "https://localhost:8443")::get) {} }

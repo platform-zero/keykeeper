@@ -2,6 +2,13 @@
 
 A Kotlin/JDK 21 web vault and CLI with an OpenBao KV-v2 adapter and a strict OIDC/JWT verifier. HTTP remains loopback-only; explicit native TLS serving supports the [verified private Keycloak/Keykeeper deployment](../platform/docs/private-keykeeper-integration.md). **Not an independently accepted production vault. Do not use real credentials in fixtures.** Deployment recipes and native probes live in the sibling platform/acceptance repositories; no old P0 code is copied.
 
+**Current completion policy:** [rapid completion](../platform/docs/rapid-completion.md)
+authorizes direct implementation and bounded execution through qualification, with no
+subagents or coverage quota. The latest recorded Keykeeper targeted unit checkpoint is
+**31 passed** (`keykeeper-unit-01.log`); it is not a fresh full-suite result or live release
+qualification. Whole-stack qualification remains **0/2**. Component evidence below retains
+its original scope and does not establish current production credential custody.
+
 ## What works
 
 - `Vault` checks a *verified* `(issuer, subject, kind)` for every list/read/create/edit/share/revoke. Humans and agents have exactly the same authorization and operations. READ controls discovery and release; EDIT replaces values; SHARE delegates only rights held by the actor, and can revoke a grant. Revocation is checked on every request (not against a cached session).
@@ -17,7 +24,7 @@ export GRADLE_USER_HOME=/mnt/media/p0-v3/cache/gradle-user
 ./gradlew --offline clean check
 ```
 
-JaCoCo 0.8.13 enforces **at least 90% LINE coverage of the entire production bundle** on both `test` and `check`; no production classes are excluded. Report: `build/reports/jacoco/test/html/index.html` and `build/reports/jacoco/test/jacocoTestReport.xml`. As measured by `./gradlew --offline clean check`: **519 covered / 560 total production lines = 92.67857142857143% (92.68%)**. The separate opt-in actual Bao and Raft restore tests do not contribute to this offline test figure.
+JaCoCo 0.8.13 reports are optional diagnostics (`./gradlew jacocoTestReport`); `test` and `check` no longer enforce a coverage quota. Report: `build/reports/jacoco/test/html/index.html` and `build/reports/jacoco/test/jacocoTestReport.xml`. Historical measurement from an earlier `./gradlew --offline clean check`: **519 covered / 560 total production lines = 92.67857142857143% (92.68%)**. The separate opt-in actual Bao and Raft restore tests do not contribute to this offline test figure.
 
 Offline tests exercise locally generated RSA-signed OIDC tokens, a disposable **fake** IdP token endpoint exchanging S256 PKCE codes for signed JWTs, callback issuer validation, state/cookie/CSRF/logout/session expiry, fail-closed unsupported device grant and a fake device authorization endpoint/CLI token-in-memory path, authorization/revocation, HTTP bearer failures, local server configuration, KV-v2 wire requests/CAS/conflicts using an in-process **fake** Bao server, and audit redaction. They do **not** prove integration with a real OpenBao/SSO installation.
 
@@ -25,7 +32,7 @@ Offline tests exercise locally generated RSA-signed OIDC tokens, a disposable **
 
 `keykeeper-identity-r4` now serves native HTTPS with real Keycloak 26.8.1 and scoped OpenBao. Actual browser password-change/TOTP, create/edit/share/revoke, agent CLI read-only access, outsider/CSRF denial and supervised persistence pass. Native database reads verify exact subjects and OTP state. Keycloak uses separate application and introspection audience mappers; its new audience check is not disabled. [Evidence, reproduction and limits](../platform/docs/private-keykeeper-integration.md) include the sealed-backend 503 test and explicit operator unseal.
 
-Unit-only coverage is **576/617 lines (93.35%)**; native probes are excluded. Production custody, service-token renewal/rotation, coordinated restoration, public deployment and independent full-stack acceptance remain unfinished. The fixture backend token is non-renewing and time-bounded to 768 hours, not a production lifecycle implementation.
+The historical unit-only coverage measurement was **576/617 lines (93.35%)**; native probes were excluded. Production custody, service-token renewal/rotation, coordinated restoration, public deployment and independent full-stack acceptance remain unfinished. The fixture backend token is non-renewing and time-bounded to 768 hours, not a production lifecycle implementation.
 
 ## Persistent private backend evidence
 

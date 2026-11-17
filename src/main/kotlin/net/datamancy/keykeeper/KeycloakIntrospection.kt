@@ -41,10 +41,15 @@ class PinnedKeycloakIntrospection internal constructor(
             .POST(HttpRequest.BodyPublishers.ofString(form)).build()
         val (status, body) = transport(request)
         return body.use { stream ->
-            if (status != 200) true
-            else {
-                val bytes = stream.readNBytes(65_537)
-                bytes.size > 65_536 || !introspectionActive(bytes.toString(Charsets.UTF_8), jti, subject)
+            if (status != 200) throw IllegalStateException("Introspection unavailable")
+            val bytes = stream.readNBytes(65_537)
+            if (bytes.size > 65_536) throw IllegalStateException("Introspection oversized")
+            val result = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
+            when (result["active"]?.jsonPrimitive?.booleanOrNull) {
+                false -> true // Explicit Keycloak token inactivity, not a transport error.
+                true -> if (introspectionActive(bytes.toString(Charsets.UTF_8), jti, subject)) false
+                    else throw IllegalStateException("Introspection subject changed")
+                else -> throw IllegalStateException("Introspection malformed")
             }
         }
     }
